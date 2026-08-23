@@ -40,13 +40,20 @@ jobs:
 
     - name: Setup KernelSU-Next
       run: |
-        if [ ! -L drivers/kernelsu ] && [ -d .deps/KernelSU-Next/kernel ]; then
-          ln -sf "$(pwd)/.deps/KernelSU-Next/kernel" drivers/kernelsu
-          grep -q 'CONFIG_KSU' drivers/Makefile || \
-            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
-          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || \
-            sed -i '/endmenu/i\\tsource "drivers/kernelsu/Kconfig"' drivers/Kconfig
+        # Clone KernelSU-Next if not already present
+        if [ ! -d .deps/KernelSU-Next/kernel ]; then
+          mkdir -p .deps
+          git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next.git .deps/KernelSU-Next
         fi
+        # Wire KernelSU-Next into the kernel tree
+        if [ ! -L drivers/kernelsu ]; then
+          ln -sf "$(pwd)/.deps/KernelSU-Next/kernel" drivers/kernelsu
+        fi
+        grep -q 'CONFIG_KSU' drivers/Makefile || \
+          printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+        grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || \
+          sed -i '/endmenu/i\tsource "drivers/kernelsu/Kconfig"' drivers/Kconfig
+        echo "KernelSU-Next wired OK"
 
     - name: Generate kernel defconfig
       run: make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
