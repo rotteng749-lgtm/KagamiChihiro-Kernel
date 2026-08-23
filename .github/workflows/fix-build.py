@@ -2,11 +2,15 @@
 """
 Fix build errors for KagamiChihiro GKI 5.10 kernel.
 
-Issues:
-1. ntsync.c uses lockdep_assert() — not available in 5.10, should be lockdep_assert_held()
-2. ntsync.c uses LOCK_STATE_NOT_HELD — not available in 5.10
-3. include/net/tcp.h missing struct bbr3 definition (patch didn't apply fully)
-4. GSO_LEGACY_MAX_SIZE not defined in 5.10
+Issues to fix:
+1. ntsync.c: lockdep_assert() -> lockdep_assert_held() for 5.10
+2. ntsync.c: LOCK_STATE_NOT_HELD doesn't exist in 5.10
+3. ntsync.c: lockdep_is_held() only defined with CONFIG_LOCKDEP, need type variant
+4. include/net/tcp.h: missing struct bbr3 definition
+5. include/net/tcp.h: missing tcp_plb_net_context and tcp_get_plb_ctx
+6. net/ipv4/tcp_bbr3.c: min_tso_segs -> tso_segs (5.10 API)
+7. net/ipv4/tcp_bbr3.c: bbr3_tso_segs needs extra param for 5.10
+8. GSO_LEGACY_MAX_SIZE not defined in 5.10
 """
 import re, sys
 
@@ -27,7 +31,12 @@ def fix_ntsync():
     # 2. Remove LOCK_STATE_NOT_HELD comparisons
     content = content.replace(" != LOCK_STATE_NOT_HELD", "")
 
-    # 3. Add lockdep.h include if missing
+    # 3. lockdep_is_held(x) -> lockdep_is_held_type(x, 0)
+    # lockdep_is_held is only defined when CONFIG_LOCKDEP is on,
+    # but lockdep_is_held_type has a stub that returns (1)
+    content = re.sub(r'\blockdep_is_held\(([^)]+)\)', r'lockdep_is_held_type(\1, 0)', content)
+
+    # 4. Add lockdep.h include if missing
     if "linux/lockdep.h" not in content:
         content = content.replace(
             "#include <linux/module.h>",
@@ -38,7 +47,7 @@ def fix_ntsync():
     if content != orig:
         with open(path, "w") as f:
             f.write(content)
-        print(f"[FIX] {path}: lockdep_assert -> lockdep_assert_held, removed LOCK_STATE_NOT_HELD")
+        print(f"[FIX] {path}: lockdep fixes applied")
     else:
         print(f"[OK] {path}: no changes needed")
 
@@ -52,100 +61,233 @@ def fix_tcp_h():
         print(f"[SKIP] {path} not found")
         return
 
-    if "struct bbr3 {" in content:
-        print(f"[OK] {path}: struct bbr3 already present")
-        return
+    orig = content
 
-    marker = "void tcp_plb_update_state_upon_rto(struct sock *sk, struct tcp_plb_state *plb);"
-    if marker not in content:
-        print(f"[WARN] {path}: marker not found, skipping struct bbr3 insertion")
-        return
+    # 1. Add tcp_plb_net_context and tcp_get_plb_ctx if missing
+    if "struct tcp_plb_net_context" not in content:
+        plb_marker = "void tcp_plb_update_state_upon_rto(struct sock *sk, struct tcp_plb_state *plb);"
+        plb_insert = plb_marker + """
 
-    struct_bbr3 = r"""
+/* PLB network-level context for BBR3 */
+struct tcp_plb_sysctl_params {
+	u8 sysctl_tcp_plb_enabled;
+	u8 sysctl_tcp_plb_idle_rehash_rounds;
+	u8 sysctl_tcp_plb_rehash_rounds;
+	u8 sysctl_tcp_plb_suspend_rto_sec;
+	int sysctl_tcp_plb_cong_thresh;
+};
+
+struct tcp_plb_net_context {
+	struct tcp_plb_sysctl_params params;
+	struct ctl_table_header *sysctl_header;
+};
+
+extern unsigned int tcp_plb_net_id;
+struct tcp_plb_net_context *tcp_get_plb_ctx(struct net *net);"""
+        content = content.replace(plb_marker, plb_insert)
+        print(f"[FIX] {path}: added tcp_plb_net_context and tcp_get_plb_ctx")
+
+    # 2. Add struct bbr3 if missing
+    if "struct bbr3 {" not in content:
+        marker = "/* At how many usecs into the future should the RTO fire? */"
+        if marker not in content:
+            # Try alternate marker
+            marker = "static inline s64 tcp_rto_delta_us"
+            if marker in content:
+                # Find the actual line
+                idx = content.index(marker)
+                # Find the start of line
+                bol = content.rfind("\n", 0, idx) + 1
+                marker = content[bol:content.index("\n", idx)]
+                struct_bbr3 = """
 
 /* BBR3 congestion control block */
 struct bbr3 {
-	u32	min_rtt_us;	        /* min RTT in min_rtt_win_sec window */
-	u32	min_rtt_stamp;	        /* timestamp of min_rtt_us */
-	u32	probe_rtt_done_stamp;   /* end time for BBR_PROBE_RTT mode */
-	u32	probe_rtt_min_us;	/* min RTT in probe_rtt_win_ms win */
-	u32	probe_rtt_min_stamp;	/* timestamp of probe_rtt_min_us */
-	u32     next_rtt_delivered;    /* scb->tx.delivered at end of round */
-	u64	cycle_mstamp;	     /* time of this cycle phase start */
-	u32     mode:2,		     /* current bbr_mode in state machine */
-		prev_ca_state:3,     /* CA state on previous ACK */
-		round_start:1,	     /* start of packet-timed tx->ack round? */
-		ce_state:1,          /* If most recent data has CE bit set */
-		bw_probe_up_rounds:5,/* cwnd-limited rounds in PROBE_UP */
-		try_fast_path:1,     /* can we take fast path? */
-		idle_restart:1,	     /* restarting after idle? */
-		probe_rtt_round_done:1,  /* a BBR_PROBE_RTT round at 4 pkts? */
-		init_cwnd:7,         /* initial cwnd */
-		unused_1:10;
-	u32	pacing_gain:10,	/* current gain for setting pacing rate */
-		cwnd_gain:10,	/* current gain for setting cwnd */
-		full_bw_reached:1,   /* reached full bw in Startup? */
-		full_bw_cnt:2,	/* number of rounds without large bw gains */
-		cycle_idx:2,	/* current index in pacing_gain cycle array */
-		has_seen_rtt:1, /* have we seen an RTT sample yet? */
-		unused_2:6;
-	u32	prior_cwnd;	/* prior cwnd upon entering loss recovery */
-	u32	full_bw;	/* recent bw, to estimate if pipe is full */
-
-	/* For tracking ACK aggregation: */
-	u64	ack_epoch_mstamp;	/* start of ACK sampling epoch */
-	u16	extra_acked[2];		/* max excess data ACKed in epoch */
-	u32	ack_epoch_acked:20,	/* packets (S)ACKed in sampling epoch */
-		extra_acked_win_rtts:5,	/* age of extra_acked, in round trips */
-		extra_acked_win_idx:1,	/* current index in extra_acked array */
-	/* BBR v3 state: */
-		full_bw_now:1,		/* recently reached full bw plateau? */
-		startup_ecn_rounds:2,	/* consecutive hi ECN STARTUP rounds */
-		loss_in_cycle:1,	/* packet loss in this cycle? */
-		ecn_in_cycle:1,		/* ECN in this cycle? */
-		unused_3:1;
-	u32	loss_round_delivered; /* scb->tx.delivered ending loss round */
-	u32	undo_bw_lo;	     /* bw_lo before latest losses */
-	u32	undo_inflight_lo;    /* inflight_lo before latest losses */
-	u32	undo_inflight_hi;    /* inflight_hi before latest losses */
-	u32	bw_latest;	 /* max delivered bw in last round trip */
-	u32	bw_lo;		 /* lower bound on sending bandwidth */
-	u32	bw_hi[2];	 /* max recent measured bw sample */
-	u32	inflight_latest; /* max delivered data in last round trip */
-	u32	inflight_lo;	 /* lower bound of inflight data range */
-	u32	inflight_hi;	 /* upper bound of inflight data range */
-	u32	bw_probe_up_cnt; /* packets delivered per inflight_hi incr */
-	u32	bw_probe_up_acks;  /* packets (S)ACKed since inflight_hi incr */
-	u32	probe_wait_us;	 /* PROBE_DOWN until next clock-driven probe */
-	u32	prior_rcv_nxt;	/* tp->rcv_nxt when CE state last changed */
-	u32	ecn_eligible:1,	/* sender can use ECN (RTT, handshake)? */
-		ecn_alpha:9,	/* EWMA delivered_ce/delivered; 0..256 */
-		bw_probe_samples:1,    /* rate samples reflect bw probing? */
-		prev_probe_too_high:1, /* did last PROBE_UP go too high? */
-		stopped_risky_probe:1, /* last PROBE_UP stopped due to risk? */
-		rounds_since_probe:8,  /* packet-timed rounds since probed bw */
-		loss_round_start:1,    /* loss_round_delivered round trip? */
-		loss_in_round:1,       /* loss marked in this round trip? */
-		ecn_in_round:1,	       /* ECN marked in this round trip? */
-		ack_phase:3,	       /* bbr_ack_phase: meaning of ACKs */
-		loss_events_in_round:4,/* losses in STARTUP round */
-		initialized:1;	       /* has bbr_init() been called? */
-	u32	alpha_last_delivered;	 /* tp->delivered at alpha update */
-	u32	alpha_last_delivered_ce; /* tp->delivered_ce at alpha update */
-
-	u8	unused_4;		/* to preserve alignment */
-	struct tcp_plb_state plb;
-
-	/* react to a specific lost skb (optional) */
-	void (*skb_marked_lost)(struct sock *sk, const struct sk_buff *skb);
+\tu32\tmin_rtt_us;
+\tu32\tmin_rtt_stamp;
+\tu32\tprobe_rtt_done_stamp;
+\tu32\tprobe_rtt_min_us;
+\tu32\tprobe_rtt_min_stamp;
+\tu32     next_rtt_delivered;
+\tu64\tcycle_mstamp;
+\tu32     mode:2,
+\t\tprev_ca_state:3,
+\t\tround_start:1,
+\t\tce_state:1,
+\t\tbw_probe_up_rounds:5,
+\t\ttry_fast_path:1,
+\t\tidle_restart:1,
+\t\tprobe_rtt_round_done:1,
+\t\tinit_cwnd:7,
+\t\tunused_1:10;
+\tu32\tpacing_gain:10,
+\t\tcwnd_gain:10,
+\t\tfull_bw_reached:1,
+\t\tfull_bw_cnt:2,
+\t\tcycle_idx:2,
+\t\thas_seen_rtt:1,
+\t\tunused_2:6;
+\tu32\tprior_cwnd;
+\tu32\tfull_bw;
+\tu64\tack_epoch_mstamp;
+\tu16\textra_acked[2];
+\tu32\tack_epoch_acked:20,
+\t\textra_acked_win_rtts:5,
+\t\textra_acked_win_idx:1,
+\t\tfull_bw_now:1,
+\t\tstartup_ecn_rounds:2,
+\t\tloss_in_cycle:1,
+\t\tecn_in_cycle:1,
+\t\tunused_3:1;
+\tu32\tloss_round_delivered;
+\tu32\tundo_bw_lo;
+\tu32\tundo_inflight_lo;
+\tu32\tundo_inflight_hi;
+\tu32\tbw_latest;
+\tu32\tbw_lo;
+\tu32\tbw_hi[2];
+\tu32\tinflight_latest;
+\tu32\tinflight_lo;
+\tu32\tinflight_hi;
+\tu32\tbw_probe_up_cnt;
+\tu32\tbw_probe_up_acks;
+\tu32\tprobe_wait_us;
+\tu32\tprior_rcv_nxt;
+\tu32\tecn_eligible:1,
+\t\tecn_alpha:9,
+\t\tbw_probe_samples:1,
+\t\tprev_probe_too_high:1,
+\t\tstopped_risky_probe:1,
+\t\trounds_since_probe:8,
+\t\tloss_round_start:1,
+\t\tloss_in_round:1,
+\t\tecn_in_round:1,
+\t\tack_phase:3,
+\t\tloss_events_in_round:4,
+\t\tinitialized:1;
+\tu32\talpha_last_delivered;
+\tu32\talpha_last_delivered_ce;
+\tu8\tunused_4;
+\tstruct tcp_plb_state plb;
+\tvoid (*skb_marked_lost)(struct sock *sk, const struct sk_buff *skb);
 };
 
 """
+                content = content.replace(marker, struct_bbr3 + marker, 1)
+                print(f"[FIX] {path}: added struct bbr3 definition")
+            else:
+                print(f"[WARN] {path}: could not find insertion point for struct bbr3")
+        else:
+            struct_bbr3 = """
 
-    content = content.replace(marker, marker + struct_bbr3)
-    with open(path, "w") as f:
-        f.write(content)
-    print(f"[FIX] {path}: added struct bbr3 definition")
+/* BBR3 congestion control block */
+struct bbr3 {
+\tu32\tmin_rtt_us;
+\tu32\tmin_rtt_stamp;
+\tu32\tprobe_rtt_done_stamp;
+\tu32\tprobe_rtt_min_us;
+\tu32\tprobe_rtt_min_stamp;
+\tu32     next_rtt_delivered;
+\tu64\tcycle_mstamp;
+\tu32     mode:2,
+\t\tprev_ca_state:3,
+\t\tround_start:1,
+\t\tce_state:1,
+\t\tbw_probe_up_rounds:5,
+\t\ttry_fast_path:1,
+\t\tidle_restart:1,
+\t\tprobe_rtt_round_done:1,
+\t\tinit_cwnd:7,
+\t\tunused_1:10;
+\tu32\tpacing_gain:10,
+\t\tcwnd_gain:10,
+\t\tfull_bw_reached:1,
+\t\tfull_bw_cnt:2,
+\t\tcycle_idx:2,
+\t\thas_seen_rtt:1,
+\t\tunused_2:6;
+\tu32\tprior_cwnd;
+\tu32\tfull_bw;
+\tu64\tack_epoch_mstamp;
+\tu16\textra_acked[2];
+\tu32\tack_epoch_acked:20,
+\t\textra_acked_win_rtts:5,
+\t\textra_acked_win_idx:1,
+\t\tfull_bw_now:1,
+\t\tstartup_ecn_rounds:2,
+\t\tloss_in_cycle:1,
+\t\tecn_in_cycle:1,
+\t\tunused_3:1;
+\tu32\tloss_round_delivered;
+\tu32\tundo_bw_lo;
+\tu32\tundo_inflight_lo;
+\tu32\tundo_inflight_hi;
+\tu32\tbw_latest;
+\tu32\tbw_lo;
+\tu32\tbw_hi[2];
+\tu32\tinflight_latest;
+\tu32\tinflight_lo;
+\tu32\tinflight_hi;
+\tu32\tbw_probe_up_cnt;
+\tu32\tbw_probe_up_acks;
+\tu32\tprobe_wait_us;
+\tu32\tprior_rcv_nxt;
+\tu32\tecn_eligible:1,
+\t\tecn_alpha:9,
+\t\tbw_probe_samples:1,
+\t\tprev_probe_too_high:1,
+\t\tstopped_risky_probe:1,
+\t\trounds_since_probe:8,
+\t\tloss_round_start:1,
+\t\tloss_in_round:1,
+\t\tecn_in_round:1,
+\t\tack_phase:3,
+\t\tloss_events_in_round:4,
+\t\tinitialized:1;
+\tu32\talpha_last_delivered;
+\tu32\talpha_last_delivered_ce;
+\tu8\tunused_4;
+\tstruct tcp_plb_state plb;
+\tvoid (*skb_marked_lost)(struct sock *sk, const struct sk_buff *skb);
+};
+
+"""
+            content = content.replace(marker, struct_bbr3 + marker, 1)
+            print(f"[FIX] {path}: added struct bbr3 definition")
+
+    if content != orig:
+        with open(path, "w") as f:
+            f.write(content)
+    else:
+        print(f"[OK] {path}: no changes needed")
+
+
+def fix_bbr3_c():
+    path = "net/ipv4/tcp_bbr3.c"
+    try:
+        with open(path, "r") as f:
+            content = f.read()
+    except FileNotFoundError:
+        print(f"[SKIP] {path} not found")
+        return
+
+    orig = content
+
+    # 1. Fix bbr3_tso_segs signature: needs unsigned int mss_now param for 5.10
+    content = content.replace(
+        "static u32 bbr3_tso_segs(struct sock *sk)",
+        "static u32 bbr3_tso_segs(struct sock *sk, unsigned int mss_now)"
+    )
+
+    # 2. Fix min_tso_segs -> tso_segs (5.10 field name)
+    content = content.replace(".min_tso_segs", ".tso_segs")
+
+    if content != orig:
+        with open(path, "w") as f:
+            f.write(content)
+        print(f"[FIX] {path}: fixed tso_segs signature and field name")
+    else:
+        print(f"[OK] {path}: no changes needed")
 
 
 def fix_gso():
@@ -171,9 +313,45 @@ def fix_gso():
     print(f"[FIX] {path}: added GSO_LEGACY_MAX_SIZE define")
 
 
+def fix_tcp_plb_c():
+    """Add tcp_get_plb_ctx implementation to tcp_plb.c"""
+    path = "net/ipv4/tcp_plb.c"
+    try:
+        with open(path, "r") as f:
+            content = f.read()
+    except FileNotFoundError:
+        print(f"[SKIP] {path} not found")
+        return
+
+    if "tcp_get_plb_ctx" in content:
+        print(f"[OK] {path}: tcp_get_plb_ctx already present")
+        return
+
+    # Add tcp_plb_net_id and tcp_get_plb_ctx before the existing functions
+    marker = "void tcp_plb_update_state"
+    if marker in content:
+        insert = """unsigned int tcp_plb_net_id __read_mostly;
+
+struct tcp_plb_net_context *tcp_get_plb_ctx(struct net *net)
+{
+	return net_generic(net, tcp_plb_net_id);
+}
+EXPORT_SYMBOL_GPL(tcp_get_plb_ctx);
+
+"""
+        content = content.replace(marker, insert + marker, 1)
+        with open(path, "w") as f:
+            f.write(content)
+        print(f"[FIX] {path}: added tcp_get_plb_ctx implementation")
+    else:
+        print(f"[WARN] {path}: marker not found for tcp_get_plb_ctx insertion")
+
+
 if __name__ == "__main__":
     print("=== Applying KagamiChihiro build fixes ===")
     fix_ntsync()
     fix_tcp_h()
+    fix_bbr3_c()
+    fix_tcp_plb_c()
     fix_gso()
     print("=== Done ===")
