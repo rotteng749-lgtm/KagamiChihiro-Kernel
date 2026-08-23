@@ -45,10 +45,10 @@ jobs:
           mkdir -p .deps
           git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next.git .deps/KernelSU-Next
         fi
-        # Wire KernelSU-Next into the kernel tree
-        if [ ! -L drivers/kernelsu ]; then
-          ln -sf "$(pwd)/.deps/KernelSU-Next/kernel" drivers/kernelsu
-        fi
+        # Remove any old/broken symlink and recreate
+        rm -f drivers/kernelsu
+        ln -sf "$(pwd)/.deps/KernelSU-Next/kernel" drivers/kernelsu
+        ls -la drivers/kernelsu/Kconfig || (echo 'ERROR: kernelsu Kconfig not found' && exit 1)
         grep -q 'CONFIG_KSU' drivers/Makefile || \
           printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
         grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || \
