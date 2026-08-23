@@ -1,0 +1,219 @@
+# ============================================================================
+#  KagamiChihiro GKI 5.10 — GitHub Actions Build
+#  Target: Infinix Note 30 (X6833B / MT6789)
+#  Arch  : aarch64 (arm64)
+# ============================================================================
+name: Build KagamiChihiro Kernel
+
+on:
+  push:
+    branches: [ chihiro-rebase ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+    # ---------------------------------------------------------------
+    # 1. Checkout
+    # ---------------------------------------------------------------
+    - name: Checkout kernel source
+      uses: actions/checkout@v4
+      with:
+        ref: chihiro-rebase
+        submodules: false
+        fetch-depth: 0
+
+    # ---------------------------------------------------------------
+    # 2. Install dependencies
+    # ---------------------------------------------------------------
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq \
+          clang lld llvm bc bison flex libssl-dev \
+          libelf-dev gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+          zip curl git python3 python-is-python3 device-tree-compiler \
+          cpio rsync
+
+    # ---------------------------------------------------------------
+    # 3. Fix build errors before compilation
+    # ---------------------------------------------------------------
+    - name: Apply build fixes
+      run: |
+        echo "[*] Fixing ntsync.c — lockdep_assert() → lockdep_assert_held() for 5.10..."
+        # lockdep_assert() does not exist in 5.10; replace with lockdep_assert_held()
+        sed -i 's/lockdep_assert(/lockdep_assert_held(/g' drivers/misc/ntsync.c
+        # LOCK_STATE_NOT_HELD does not exist in 5.10 — replace with !lockdep_is_held()
+        # Pattern: lockdep_is_held(&(obj)->lock) != LOCK_STATE_NOT_HELD  →  lockdep_is_held(&(obj)->lock)
+        sed -i 's/!= LOCK_STATE_NOT_HELD//g' drivers/misc/ntsync.c
+
+        echo "[*] Fixing ntsync.c — add missing lockdep include if needed..."
+        # Ensure linux/lockdep.h is included (lockdep_assert_held is there)
+        grep -q 'linux/lockdep.h' drivers/misc/ntsync.c || \
+          sed -i '/#include <linux\/module.h>/a #include <linux/lockdep.h>' drivers/misc/ntsync.c
+
+        echo "[*] Fixing include/net/tcp.h — adding missing struct bbr3..."
+        # Insert struct bbr3 definition after tcp_plb_update_state_upon_rto
+        # (the BBR3 patch didn't apply this part to the header)
+        if ! grep -q 'struct bbr3 {' include/net/tcp.h; then
+          sed -i '/^void tcp_plb_update_state_upon_rto(struct sock \*sk, struct tcp_plb_state \*plb);$/a\
+\
+/* BBR3 congestion control block */\
+struct bbr3 {\
+\tu32\tmin_rtt_us;\
+\tu32\tmin_rtt_stamp;\
+\tu32\tprobe_rtt_done_stamp;\
+\tu32\tprobe_rtt_min_us;\
+\tu32\tprobe_rtt_min_stamp;\
+\tu32\t    next_rtt_delivered;\
+\tu64\tcycle_mstamp;\
+\tu32\t    mode:2,\
+\t\t    prev_ca_state:3,\
+\t\t    round_start:1,\
+\t\t    ce_state:1,\
+\t\t    bw_probe_up_rounds:5,\
+\t\t    try_fast_path:1,\
+\t\t    idle_restart:1,\
+\t\t    probe_rtt_round_done:1,\
+\t\t    init_cwnd:7,\
+\t\t    unused_1:10;\
+\tu32\tpacing_gain:10,\
+\t\tcwnd_gain:10,\
+\t\tfull_bw_reached:1,\
+\t\tfull_bw_cnt:2,\
+\t\tcycle_idx:2,\
+\t\thas_seen_rtt:1,\
+\t\tunused_2:6;\
+\tu32\tprior_cwnd;\
+\tu32\tfull_bw;\
+\tu64\tack_epoch_mstamp;\
+\tu16\textra_acked[2];\
+\tu32\tack_epoch_acked:20,\
+\t\textra_acked_win_rtts:5,\
+\t\textra_acked_win_idx:1,\
+\t\tfull_bw_now:1,\
+\t\tstartup_ecn_rounds:2,\
+\t\tloss_in_cycle:1,\
+\t\tecn_in_cycle:1,\
+\t\tunused_3:1;\
+\tu32\tloss_round_delivered;\
+\tu32\tundo_bw_lo;\
+\tu32\tundo_inflight_lo;\
+\tu32\tundo_inflight_hi;\
+\tu32\tbw_latest;\
+\tu32\tbw_lo;\
+\tu32\tbw_hi[2];\
+\tu32\tinflight_latest;\
+\tu32\tinflight_lo;\
+\tu32\tinflight_hi;\
+\tu32\tbw_probe_up_cnt;\
+\tu32\tbw_probe_up_acks;\
+\tu32\tprobe_wait_us;\
+\tu32\tprior_rcv_nxt;\
+\tu32\tecn_eligible:1,\
+\t\tecn_alpha:9,\
+\t\tbw_probe_samples:1,\
+\t\tprev_probe_too_high:1,\
+\t\tstopped_risky_probe:1,\
+\t\trounds_since_probe:8,\
+\t\tloss_round_start:1,\
+\t\tloss_in_round:1,\
+\t\tecn_in_round:1,\
+\t\tack_phase:3,\
+\t\tloss_events_in_round:4,\
+\t\tinitialized:1;\
+\tu32\talpha_last_delivered;\
+\tu32\talpha_last_delivered_ce;\
+\
+\tu8\tunused_4;\
+\tstruct tcp_plb_state plb;\
+\
+\tvoid (*skb_marked_lost)(struct sock *sk, const struct sk_buff *skb);\
+};' include/net/tcp.h
+        fi
+
+        echo "[*] Fixing GSO_LEGACY_MAX_SIZE in tcp_bbr3.c..."
+        # GSO_LEGACY_MAX_SIZE doesn't exist in 5.10, alias it to GSO_MAX_SIZE
+        if ! grep -q 'GSO_LEGACY_MAX_SIZE' include/linux/netdevice.h; then
+          sed -i '/#define GSO_MAX_SIZE/a #define GSO_LEGACY_MAX_SIZE GSO_MAX_SIZE' include/linux/netdevice.h
+        fi
+
+        echo "[*] All build fixes applied."
+
+    # ---------------------------------------------------------------
+    # 4. Wire KernelSU-Next (idempotent)
+    # ---------------------------------------------------------------
+    - name: Setup KernelSU-Next
+      run: |
+        if [ ! -L drivers/kernelsu ]; then
+          if [ -d .deps/KernelSU-Next/kernel ]; then
+            ln -sf "$(pwd)/.deps/KernelSU-Next/kernel" drivers/kernelsu
+          fi
+          grep -q 'CONFIG_KSU' drivers/Makefile || \
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || \
+            sed -i '/endmenu/i\\tsource "drivers/kernelsu/Kconfig"' drivers/Kconfig
+        fi
+
+    # ---------------------------------------------------------------
+    # 5. Generate defconfig
+    # ---------------------------------------------------------------
+    - name: Generate kernel defconfig
+      run: |
+        make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
+
+    # ---------------------------------------------------------------
+    # 6. Build kernel (Image.gz + Image + modules)
+    # ---------------------------------------------------------------
+    - name: Build kernel Image
+      run: |
+        make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 -j$(nproc) Image Image.gz 2>&1 | \
+          tee out/build.log | grep -iE 'error|fatal|Kernel: arch' | tail -50
+        ls -lh out/arch/arm64/boot/Image.gz 2>/dev/null || \
+          (echo "❌ Build failed!" && tail -100 out/build.log && exit 1)
+        echo "✅ Kernel built successfully!"
+
+    # ---------------------------------------------------------------
+    # 7. Package with AnyKernel3
+    # ---------------------------------------------------------------
+    - name: Package AnyKernel3 zip
+      run: |
+        # Clone AnyKernel3 if not present
+        if [ ! -d .deps/AnyKernel3 ]; then
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git .deps/AnyKernel3
+        fi
+
+        PKG="out/AnyKernel3"
+        rm -rf "$PKG"
+        cp -r .deps/AnyKernel3 "$PKG"
+
+        # Copy kernel image
+        cp out/arch/arm64/boot/Image.gz "$PKG/Image.gz"
+        cp out/arch/arm64/boot/Image "$PKG/Image"
+
+        # Customize anykernel.sh
+        sed -i 's/^kernel.string=.*/kernel.string=KagamiChihiro 5.10.260/' "$PKG/anykernel.sh"
+        sed -i 's/^do.devicecheck=.*/do.devicecheck=0/' "$PKG/anykernel.sh"
+
+        # Zip it
+        cd "$PKG"
+        zip -r9 "../KagamiChihiro-5.10.260.zip" . -x '*.git*' -x '*.placeholder'
+        cd -
+        echo "📦 Zip: $(ls -lh out/KagamiChihiro-5.10.260.zip)"
+
+    # ---------------------------------------------------------------
+    # 8. Upload artifact
+    # ---------------------------------------------------------------
+    - name: Upload kernel zip
+      uses: actions/upload-artifact@v4
+      with:
+        name: KagamiChihiro-5.10.260
+        path: out/KagamiChihiro-5.10.260.zip
+        retention-days: 14
+        if-no-files-found: error
