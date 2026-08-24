@@ -43,13 +43,11 @@ jobs:
 
     - name: Setup KernelSU-Next ${{ env.KERNELSU_VERSION }}
       run: |
-        # Clone KernelSU-Next at stable release tag
         if [ ! -d .deps/KernelSU-Next/kernel ]; then
           mkdir -p .deps
           git clone --depth=1 --branch ${{ env.KERNELSU_VERSION }} \
             https://github.com/KernelSU-Next/KernelSU-Next.git .deps/KernelSU-Next
         fi
-        # Remove any old/broken symlink and recreate
         rm -f drivers/kernelsu
         ln -sf "$(pwd)/.deps/KernelSU-Next/kernel" drivers/kernelsu
         ls -la drivers/kernelsu/Kconfig || (echo 'ERROR: kernelsu Kconfig not found' && exit 1)
@@ -74,69 +72,7 @@ jobs:
         echo "Kernel built: $(ls -lh out/arch/arm64/boot/Image.gz)"
 
     - name: Package AnyKernel3 zip
-      run: |
-        if [ ! -d .deps/AnyKernel3 ]; then
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git .deps/AnyKernel3
-        fi
-        PKG="out/AnyKernel3"
-        rm -rf "$PKG"
-        cp -r .deps/AnyKernel3 "$PKG"
-        cp out/arch/arm64/boot/Image "$PKG/Image"
-        cp out/arch/arm64/boot/Image.gz "$PKG/Image.gz"
-
-        # Write a clean anykernel.sh for GKI device
-        cat > "$PKG/anykernel.sh" << 'AKEOF'
-### AnyKernel3 Ramdisk Mod Script
-## osm0sis @ xda-developers
-
-### AnyKernel setup
-# global properties
-properties() { '
-kernel.string=KagamiChihiro 5.10.260
-do.devicecheck=0
-do.modules=0
-do.systemless=0
-do.cleanup=1
-do.cleanuponabort=0
-device.name1=
-device.name2=
-device.name3=
-device.name4=
-device.name5=
-supported.versions=
-supported.patchlevels=
-supported.vendorpatchlevels=
-'; } # end properties
-
-### AnyKernel install
-## boot shell variables
-BLOCK=boot;
-IS_SLOT_DEVICE=auto;
-RAMDISK_COMPRESSION=auto;
-PATCH_VBMETA_FLAG=auto;
-
-# import functions/variables and setup patching - see for reference (DO NOT REMOVE)
-. tools/ak3-core.sh;
-
-ui_print " "
-ui_print "KagamiChihiro Kernel 5.10.260"
-ui_print "Target: Infinix Note 30 (X6833B / MT6789)"
-ui_print " "
-
-# boot install
-if [ -L "/dev/block/bootdevice/by-name/init_boot_a" -o -L "/dev/block/by-name/init_boot_a" ]; then
-    split_boot
-    flash_boot
-else
-    dump_boot
-    write_boot
-fi
-AKEOF
-
-        cd "$PKG"
-        zip -r9 "../KagamiChihiro-5.10.260.zip" . -x '*.git*' -x '*.placeholder'
-        cd -
-        echo "Zip: $(ls -lh out/KagamiChihiro-5.10.260.zip)"
+      run: python3 .github/workflows/package-zip.py
 
     - name: Upload kernel zip (artifact)
       uses: actions/upload-artifact@v4
