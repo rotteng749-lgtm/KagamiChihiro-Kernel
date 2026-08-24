@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
 Fix build errors for KagamiChihiro GKI 5.10 kernel.
+Handles API mismatches between 6.x patches and 5.10 base kernel.
 """
 import re, sys
 
 def fix_ntsync():
+    """Fix ntsync.c: lockdep_assert and lockdep_is_held don't exist in 5.10 without CONFIG_LOCKDEP"""
     path = "drivers/misc/ntsync.c"
     try:
         with open(path, "r") as f:
@@ -15,42 +17,49 @@ def fix_ntsync():
 
     orig = content
 
-    # 1. lockdep_assert() -> lockdep_assert_held()
-    content = content.replace("lockdep_assert(", "lockdep_assert_held(")
+    # In kernel 5.10, lockdep_assert(expr) doesn't exist. It was added in 6.x.
+    # Define it as WARN_ON for compatibility.
+    # Also, lockdep_is_held() only exists with CONFIG_LOCKDEP enabled.
+    # We need to handle both cases.
 
-    # 2. Remove LOCK_STATE_NOT_HELD comparisons
-    content = content.replace(" != LOCK_STATE_NOT_HELD", "")
+    # Strategy: Add a compatibility block after includes that:
+    # 1. Defines lockdep_assert() as WARN_ON(!(expr)) if not defined
+    # 2. Wraps all lockdep_is_held usage in ifdef CONFIG_LOCKDEP
 
-    # 3. Replace the entire ntsync_assert_held macro with a safe version
-    # that doesn't use lockdep_is_held (which is only defined with CONFIG_LOCKDEP)
-    old_macro = """#define ntsync_assert_held(obj) \
-\tlockdep_assert_held((lockdep_is_held(&(obj)->lock) ) || \
-\t\t       ((lockdep_is_held(&(obj)->dev->wait_all_lock) ) && \
-\t\t\t(obj)->dev_locked))"""
+    # First, remove the old macro replacement approach and just add stubs
 
-    new_macro = """#ifdef CONFIG_LOCKDEP
-#define ntsync_assert_held(obj) \
-\tlockdep_assert_held((lockdep_is_held(&(obj)->lock) ) || \
-\t\t       ((lockdep_is_held(&(obj)->dev->wait_all_lock) ) && \
-\t\t\t(obj)->dev_locked))
+    # Add compat defines after the last #include before the code starts
+    compat_block = """
+/* KagamiChihiro compat: lockdep_assert doesn't exist in 5.10 */
+#ifndef lockdep_assert
+#define lockdep_assert(expr) WARN_ON(!(expr))
+#endif
+
+/* KagamiChihiro compat: lockdep_is_held only with CONFIG_LOCKDEP */
+#ifdef CONFIG_LOCKDEP
+/* use real lockdep_is_held from linux/lockdep.h */
 #else
-#define ntsync_assert_held(obj) do { (void)(obj); } while (0)
-#endif"""
+#define lockdep_is_held(lock) 1
+#endif
+"""
 
-    content = content.replace(old_macro, new_macro)
+    # Insert after the includes block (after the last #include)
+    if "KagamiChihiro compat" not in content:
+        # Find the last #include line
+        lines = content.split('\n')
+        last_include_idx = -1
+        for i, line in enumerate(lines):
+            if line.strip().startswith('#include'):
+                last_include_idx = i
 
-    # 4. Add lockdep.h include if missing
-    if "linux/lockdep.h" not in content:
-        content = content.replace(
-            "#include <linux/module.h>",
-            "#include <linux/module.h>\n#include <linux/lockdep.h>",
-            1
-        )
+        if last_include_idx >= 0:
+            lines.insert(last_include_idx + 1, compat_block)
+            content = '\n'.join(lines)
 
     if content != orig:
         with open(path, "w") as f:
             f.write(content)
-        print(f"[FIX] {path}: ntsync_assert_held wrapped in #ifdef CONFIG_LOCKDEP")
+        print(f"[FIX] {path}: added lockdep_assert and lockdep_is_held compat stubs for 5.10")
     else:
         print(f"[OK] {path}: no changes needed")
 
@@ -191,10 +200,21 @@ def fix_bbr3_c():
 
     orig = content
 
-    # 1. Fix bbr3_tso_segs signature: needs unsigned int mss_now param for 5.10
+    # 1. Fix bbr3_tso_segs: 5.10 tso_segs callback takes (struct sock *, unsigned int)
+    #    The 6.x version takes just (struct sock *)
+    #    BUT the function body has: unsigned int mss_now = tcp_current_mss(sk);
+    #    which conflicts if we add mss_now as a parameter.
+    #    Solution: add param AND remove the local declaration, use param directly.
     content = content.replace(
         "static u32 bbr3_tso_segs(struct sock *sk)",
         "static u32 bbr3_tso_segs(struct sock *sk, unsigned int mss_now)"
+    )
+
+    # Now remove the local mss_now declaration since it's now a parameter
+    content = content.replace(
+        "\tunsigned int mss_now = tcp_current_mss(sk);\n",
+        "\t/* mss_now is now a parameter for 5.10 compat */\n",
+        1  # only first occurrence
     )
 
     # 2. Fix min_tso_segs -> tso_segs (5.10 field name)
@@ -203,7 +223,7 @@ def fix_bbr3_c():
     if content != orig:
         with open(path, "w") as f:
             f.write(content)
-        print(f"[FIX] {path}: fixed tso_segs signature and field name")
+        print(f"[FIX] {path}: fixed tso_segs signature, removed mss_now redefinition, fixed field name")
     else:
         print(f"[OK] {path}: no changes needed")
 
