@@ -13,6 +13,9 @@ on:
 permissions:
   contents: write
 
+env:
+  KERNELSU_VERSION: v3.3.0
+
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -38,12 +41,13 @@ jobs:
     - name: Apply build fixes
       run: python3 .github/workflows/fix-build.py
 
-    - name: Setup KernelSU-Next
+    - name: Setup KernelSU-Next ${{ env.KERNELSU_VERSION }}
       run: |
-        # Clone KernelSU-Next if not already present
+        # Clone KernelSU-Next at stable release tag
         if [ ! -d .deps/KernelSU-Next/kernel ]; then
           mkdir -p .deps
-          git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next.git .deps/KernelSU-Next
+          git clone --depth=1 --branch ${{ env.KERNELSU_VERSION }} \
+            https://github.com/KernelSU-Next/KernelSU-Next.git .deps/KernelSU-Next
         fi
         # Remove any old/broken symlink and recreate
         rm -f drivers/kernelsu
@@ -53,7 +57,7 @@ jobs:
           printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
         grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || \
           sed -i '/endmenu/i\tsource "drivers/kernelsu/Kconfig"' drivers/Kconfig
-        echo "KernelSU-Next wired OK"
+        echo "KernelSU-Next ${{ env.KERNELSU_VERSION }} wired OK"
 
     - name: Generate kernel defconfig
       run: make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
@@ -86,10 +90,35 @@ jobs:
         cd -
         echo "Zip: $(ls -lh out/KagamiChihiro-5.10.260.zip)"
 
-    - name: Upload kernel zip
+    - name: Upload kernel zip (artifact)
       uses: actions/upload-artifact@v4
       with:
         name: KagamiChihiro-5.10.260
         path: out/KagamiChihiro-5.10.260.zip
         retention-days: 14
         if-no-files-found: error
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: build-${{ github.run_number }}
+        name: "KagamiChihiro 5.10.260 (Build #${{ github.run_number }})"
+        body: |
+          ## KagamiChihiro Kernel 5.10.260
+
+          **Target:** Infinix Note 30 (X6833B / MT6789)
+          **Arch:** aarch64 (arm64)
+          **KernelSU-Next:** ${{ env.KERNELSU_VERSION }}
+          **Commit:** ${{ github.sha }}
+
+          ### Install
+          1. Reboot to recovery
+          2. Flash `KagamiChihiro-5.10.260.zip`
+          3. Reboot
+
+          ### Changelog
+          - Auto-built from commit ${{ github.sha }}
+        files: out/KagamiChihiro-5.10.260.zip
+        make_latest: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
