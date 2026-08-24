@@ -327,6 +327,39 @@ def fix_gso():
     print(f"[FIX] {path}: added GSO_LEGACY_MAX_SIZE define")
 
 
+def fix_yamada():
+    """Fix drivers/Yamada: provide stub for missing ksu_pavolia_add_prop symbol"""
+    path = "drivers/Yamada/pavolia_reine_resetprop.c"
+    try:
+        with open(path, "r") as f:
+            content = f.read()
+    except FileNotFoundError:
+        print(f"[SKIP] {path} not found")
+        return
+
+    orig = content
+
+    if "KagamiChihiro compat" in content:
+        print(f"[OK] {path}: already patched")
+        return
+
+    # ksu_pavolia_add_prop is declared extern but not defined anywhere in KernelSU-Next
+    # Replace the extern declaration + function with a no-op stub
+    content = content.replace(
+        "extern void ksu_pavolia_add_prop(const char *prop, const char *val);",
+        "/* KagamiChihiro compat: stub for missing KernelSU symbol */\nstatic void ksu_pavolia_add_prop(const char *prop, const char *val) { (void)prop; (void)val; }"
+    )
+
+    content = "/* KagamiChihiro compat: patched for 5.10 kernel */\n" + content
+
+    if content != orig:
+        with open(path, "w") as f:
+            f.write(content)
+        print(f"[FIX] {path}: stubbed ksu_pavolia_add_prop")
+    else:
+        print(f"[OK] {path}: no changes needed")
+
+
 if __name__ == "__main__":
     print("=== Applying KagamiChihiro build fixes ===")
     fix_ntsync()
@@ -334,4 +367,5 @@ if __name__ == "__main__":
     fix_bbr3_c()
     fix_tcp_plb_c()
     fix_gso()
+    fix_yamada()
     print("=== Done ===")
