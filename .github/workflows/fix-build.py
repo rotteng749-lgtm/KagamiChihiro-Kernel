@@ -5,8 +5,9 @@ Handles API mismatches between 6.x patches and 5.10 base kernel.
 """
 import re, sys
 
+
 def fix_ntsync():
-    """Fix ntsync.c: lockdep_assert and lockdep_is_held don't exist in 5.10 without CONFIG_LOCKDEP"""
+    """Fix ntsync.c: Replace all lockdep usage with safe stubs for 5.10"""
     path = "drivers/misc/ntsync.c"
     try:
         with open(path, "r") as f:
@@ -17,53 +18,81 @@ def fix_ntsync():
 
     orig = content
 
-    # Kernel 5.10 issues with ntsync.c (written for 6.x):
-    # 1. lockdep_assert(expr) doesn't exist - it was added in 6.x
-    # 2. lockdep_is_held(lock) only defined in linux/lockdep.h with CONFIG_LOCKDEP
-    # 3. ntsync.c doesn't include linux/lockdep.h at all
-    # 4. LOCK_STATE_NOT_HELD doesn't exist in 5.10
-    #
-    # Solution: Add compat block with stubs after all includes
+    if "KagamiChihiro compat" in content:
+        print(f"[OK] {path}: already patched")
+        return
 
-    if "KagamiChihiro compat" not in content:
-        # Find the last #include line
-        lines = content.split('\n')
-        last_include_idx = -1
-        for i, line in enumerate(lines):
-            if line.strip().startswith('#include'):
-                last_include_idx = i
+    # 1. Replace the ntsync_assert_held macro definition entirely with a no-op.
+    #    The original macro uses lockdep_is_held() which doesn't exist in 5.10.
+    #    Use a line-by-line approach to replace the multi-line macro.
+    lines = content.split('\n')
+    new_lines = []
+    skip_until_blank = False
 
-        if last_include_idx >= 0:
-            compat_block = """
-/* KagamiChihiro compat: 5.10 kernel doesn't have these lockdep APIs from 6.x */
-#include <linux/lockdep.h>
+    for i, line in enumerate(lines):
+        if skip_until_blank:
+            if line.strip() == '' or (not line.startswith('\t') and not line.startswith(' ')):
+                skip_until_blank = False
+            else:
+                continue  # skip lines that are part of the old macro
 
-#ifndef lockdep_assert
-#define lockdep_assert(expr) WARN_ON(!(expr))
-#endif
+        if '#define ntsync_assert_held(obj)' in line and '\\' in line:
+            # Found the start of the old macro - skip all continuation lines
+            skip_until_blank = True
+            new_lines.append('#define ntsync_assert_held(obj) do { (void)(obj); } while (0)')
+            continue
 
-/* lockdep_is_held: in 5.10 this is only defined under CONFIG_LOCKDEP in lockdep.h.
- * Define a safe stub when not available. */
-#ifndef lockdep_is_held
-#ifdef CONFIG_LOCKDEP
-#define lockdep_is_held(lock) lock_is_held(&(lock)->dep_map)
-#else
-#define lockdep_is_held(lock) 1
-#endif
-#endif
-"""
-            lines.insert(last_include_idx + 1, compat_block)
-            content = '\n'.join(lines)
+        new_lines.append(line)
 
-    # Also remove LOCK_STATE_NOT_HELD references if any remain
-    # In 5.10, lockdep_is_held returns bool, not an enum state
+    content = '\n'.join(new_lines)
+
+    # 2. Replace lockdep_assert(expr) with WARN_ON(!(expr))
+    #    lockdep_assert() doesn't exist in kernel 5.10 - it was added in 6.x
+    #    Handle both single-line and the simple cases (no nested parens in remaining calls)
+    content = content.replace('lockdep_assert(', 'KAGAMI_LOCKDEP_ASSERT_HELPER(')
+
+    # Now replace the helper with WARN_ON
+    # First handle simple cases: single-line calls
+    content = re.sub(
+        r'KAGAMI_LOCKDEP_ASSERT_HELPER\(([^()]+)\)',
+        r'WARN_ON(!(\1))',
+        content
+    )
+    # Handle cases with one level of nested parens like (a) || (b)
+    content = re.sub(
+        r'KAGAMI_LOCKDEP_ASSERT_HELPER\(([^()]*(?:\([^()]+\)[^()]*)+)\)',
+        r'WARN_ON(!(\1))',
+        content
+    )
+    # If any remain, just replace them as-is
+    if 'KAGAMI_LOCKDEP_ASSERT_HELPER' in content:
+        remaining = content.count('KAGAMI_LOCKDEP_ASSERT_HELPER')
+        print(f"[WARN] {path}: {remaining} lockdep_assert calls not replaced, forcing")
+        content = re.sub(
+            r'KAGAMI_LOCKDEP_ASSERT_HELPER\((.*?)\)',
+            r'WARN_ON(!(\1))',
+            content
+        )
+
+    # 3. Remove any remaining LOCK_STATE_NOT_HELD references
     content = content.replace(" != LOCK_STATE_NOT_HELD", "")
     content = content.replace(" == LOCK_STATE_NOT_HELD", " == 0")
+
+    # 4. Add include for linux/lockdep.h (needed for lockdep_assert_held calls that remain)
+    if "linux/lockdep.h" not in content:
+        content = content.replace(
+            "#include <linux/module.h>",
+            "#include <linux/module.h>\n#include <linux/lockdep.h>",
+            1
+        )
+
+    # 5. Add compat marker at top of file
+    content = "/* KagamiChihiro compat: patched for 5.10 kernel */\n" + content
 
     if content != orig:
         with open(path, "w") as f:
             f.write(content)
-        print(f"[FIX] {path}: added lockdep compat stubs and removed LOCK_STATE_NOT_HELD")
+        print(f"[FIX] {path}: replaced ntsync_assert_held macro and lockdep_assert calls")
     else:
         print(f"[OK] {path}: no changes needed")
 
