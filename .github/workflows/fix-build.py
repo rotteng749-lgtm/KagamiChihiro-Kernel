@@ -23,15 +23,15 @@ def fix_ntsync():
 
     # 3. Replace the entire ntsync_assert_held macro with a safe version
     # that doesn't use lockdep_is_held (which is only defined with CONFIG_LOCKDEP)
-    old_macro = """#define ntsync_assert_held(obj) \\
-\tlockdep_assert_held((lockdep_is_held(&(obj)->lock) ) || \\
-\t\t       ((lockdep_is_held(&(obj)->dev->wait_all_lock) ) && \\
+    old_macro = """#define ntsync_assert_held(obj) \
+\tlockdep_assert_held((lockdep_is_held(&(obj)->lock) ) || \
+\t\t       ((lockdep_is_held(&(obj)->dev->wait_all_lock) ) && \
 \t\t\t(obj)->dev_locked))"""
 
     new_macro = """#ifdef CONFIG_LOCKDEP
-#define ntsync_assert_held(obj) \\
-\tlockdep_assert_held((lockdep_is_held(&(obj)->lock) ) || \\
-\t\t       ((lockdep_is_held(&(obj)->dev->wait_all_lock) ) && \\
+#define ntsync_assert_held(obj) \
+\tlockdep_assert_held((lockdep_is_held(&(obj)->lock) ) || \
+\t\t       ((lockdep_is_held(&(obj)->dev->wait_all_lock) ) && \
 \t\t\t(obj)->dev_locked))
 #else
 #define ntsync_assert_held(obj) do { (void)(obj); } while (0)
@@ -103,9 +103,9 @@ struct bbr3 {
 \tu32\tprobe_rtt_done_stamp;
 \tu32\tprobe_rtt_min_us;
 \tu32\tprobe_rtt_min_stamp;
-\tu32     next_rtt_delivered;
+\tu32    next_rtt_delivered;
 \tu64\tcycle_mstamp;
-\tu32     mode:2,
+\tu32    mode:2,
 \t\tprev_ca_state:3,
 \t\tround_start:1,
 \t\tce_state:1,
@@ -218,7 +218,21 @@ def fix_tcp_plb_c():
         print(f"[SKIP] {path} not found")
         return
 
+    orig = content
+
+    # CRITICAL: Add netns/generic.h include for net_generic() if missing
+    if "net/netns/generic.h" not in content:
+        content = content.replace(
+            "#include <net/tcp.h>",
+            "#include <net/tcp.h>\n#include <net/netns/generic.h>",
+            1
+        )
+        print(f"[FIX] {path}: added #include <net/netns/generic.h> for net_generic()")
+
     if "tcp_get_plb_ctx" in content:
+        if content != orig:
+            with open(path, "w") as f:
+                f.write(content)
         print(f"[OK] {path}: tcp_get_plb_ctx already present")
         return
 
