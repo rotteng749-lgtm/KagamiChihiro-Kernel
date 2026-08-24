@@ -17,33 +17,14 @@ def fix_ntsync():
 
     orig = content
 
-    # In kernel 5.10, lockdep_assert(expr) doesn't exist. It was added in 6.x.
-    # Define it as WARN_ON for compatibility.
-    # Also, lockdep_is_held() only exists with CONFIG_LOCKDEP enabled.
-    # We need to handle both cases.
+    # Kernel 5.10 issues with ntsync.c (written for 6.x):
+    # 1. lockdep_assert(expr) doesn't exist - it was added in 6.x
+    # 2. lockdep_is_held(lock) only defined in linux/lockdep.h with CONFIG_LOCKDEP
+    # 3. ntsync.c doesn't include linux/lockdep.h at all
+    # 4. LOCK_STATE_NOT_HELD doesn't exist in 5.10
+    #
+    # Solution: Add compat block with stubs after all includes
 
-    # Strategy: Add a compatibility block after includes that:
-    # 1. Defines lockdep_assert() as WARN_ON(!(expr)) if not defined
-    # 2. Wraps all lockdep_is_held usage in ifdef CONFIG_LOCKDEP
-
-    # First, remove the old macro replacement approach and just add stubs
-
-    # Add compat defines after the last #include before the code starts
-    compat_block = """
-/* KagamiChihiro compat: lockdep_assert doesn't exist in 5.10 */
-#ifndef lockdep_assert
-#define lockdep_assert(expr) WARN_ON(!(expr))
-#endif
-
-/* KagamiChihiro compat: lockdep_is_held only with CONFIG_LOCKDEP */
-#ifdef CONFIG_LOCKDEP
-/* use real lockdep_is_held from linux/lockdep.h */
-#else
-#define lockdep_is_held(lock) 1
-#endif
-"""
-
-    # Insert after the includes block (after the last #include)
     if "KagamiChihiro compat" not in content:
         # Find the last #include line
         lines = content.split('\n')
@@ -53,13 +34,36 @@ def fix_ntsync():
                 last_include_idx = i
 
         if last_include_idx >= 0:
+            compat_block = """
+/* KagamiChihiro compat: 5.10 kernel doesn't have these lockdep APIs from 6.x */
+#include <linux/lockdep.h>
+
+#ifndef lockdep_assert
+#define lockdep_assert(expr) WARN_ON(!(expr))
+#endif
+
+/* lockdep_is_held: in 5.10 this is only defined under CONFIG_LOCKDEP in lockdep.h.
+ * Define a safe stub when not available. */
+#ifndef lockdep_is_held
+#ifdef CONFIG_LOCKDEP
+#define lockdep_is_held(lock) lock_is_held(&(lock)->dep_map)
+#else
+#define lockdep_is_held(lock) 1
+#endif
+#endif
+"""
             lines.insert(last_include_idx + 1, compat_block)
             content = '\n'.join(lines)
+
+    # Also remove LOCK_STATE_NOT_HELD references if any remain
+    # In 5.10, lockdep_is_held returns bool, not an enum state
+    content = content.replace(" != LOCK_STATE_NOT_HELD", "")
+    content = content.replace(" == LOCK_STATE_NOT_HELD", " == 0")
 
     if content != orig:
         with open(path, "w") as f:
             f.write(content)
-        print(f"[FIX] {path}: added lockdep_assert and lockdep_is_held compat stubs for 5.10")
+        print(f"[FIX] {path}: added lockdep compat stubs and removed LOCK_STATE_NOT_HELD")
     else:
         print(f"[OK] {path}: no changes needed")
 
@@ -201,23 +205,19 @@ def fix_bbr3_c():
     orig = content
 
     # 1. Fix bbr3_tso_segs: 5.10 tso_segs callback takes (struct sock *, unsigned int)
-    #    The 6.x version takes just (struct sock *)
-    #    BUT the function body has: unsigned int mss_now = tcp_current_mss(sk);
-    #    which conflicts if we add mss_now as a parameter.
-    #    Solution: add param AND remove the local declaration, use param directly.
     content = content.replace(
         "static u32 bbr3_tso_segs(struct sock *sk)",
         "static u32 bbr3_tso_segs(struct sock *sk, unsigned int mss_now)"
     )
 
-    # Now remove the local mss_now declaration since it's now a parameter
+    # 2. Remove local mss_now declaration since it's now a parameter
     content = content.replace(
         "\tunsigned int mss_now = tcp_current_mss(sk);\n",
         "\t/* mss_now is now a parameter for 5.10 compat */\n",
-        1  # only first occurrence
+        1
     )
 
-    # 2. Fix min_tso_segs -> tso_segs (5.10 field name)
+    # 3. Fix min_tso_segs -> tso_segs (5.10 field name)
     content = content.replace(".min_tso_segs", ".tso_segs")
 
     if content != orig:
@@ -240,7 +240,7 @@ def fix_tcp_plb_c():
 
     orig = content
 
-    # CRITICAL: Add netns/generic.h include for net_generic() if missing
+    # Add netns/generic.h include for net_generic() if missing
     if "net/netns/generic.h" not in content:
         content = content.replace(
             "#include <net/tcp.h>",
