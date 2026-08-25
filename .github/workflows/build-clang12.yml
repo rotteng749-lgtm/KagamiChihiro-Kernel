@@ -64,18 +64,14 @@ jobs:
           echo "AOSP download failed, using system clang..."
           sudo apt-get install -y -qq clang lld llvm 2>/dev/null || true
           sudo apt-get install -y -qq clang-14 lld-14 llvm-14 2>/dev/null || true
-          CLANG_BIN=$(which clang 2>/dev/null)
-          LLD_BIN=$(which ld.lld 2>/dev/null)
-          if [ -z "$CLANG_BIN" ] || [ -z "$LLD_BIN" ]; then
-            echo "ERROR: clang or ld.lld not found!"
+          if ! command -v ld.lld &>/dev/null; then
+            echo "ERROR: ld.lld not found!"
             exit 1
           fi
-          CLANG_DIR=$(dirname "$CLANG_BIN")
-          echo "PATH=$CLANG_DIR:\$PATH" >> "$GITHUB_ENV"
           echo "CC=clang" >> "$GITHUB_ENV"
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
           echo "CROSS_COMPILE_COMPAT=arm-linux-gnueabi-" >> "$GITHUB_ENV"
-          "$CLANG_BIN" --version | head -1
+          clang --version | head -1
           echo "System clang setup done (fallback)"
         fi
 
@@ -135,7 +131,6 @@ jobs:
           **Arch:** aarch64 (arm64)
           **KernelSU-Next:** ${{ env.KERNELSU_VERSION }}
           **SUSFS:** v2.2.0
-          **Commit:** ${{ github.sha }}
 
           ### Build Info
           - Compiler: Clang ${{ env.CLANG_VERSION }} (${{ env.BUILD_LABEL }}) — original AOSP android12 clang
