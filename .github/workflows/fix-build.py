@@ -23,8 +23,6 @@ def fix_ntsync():
         return
 
     # 1. Replace the ntsync_assert_held macro definition entirely with a no-op.
-    #    The original macro uses lockdep_is_held() which doesn't exist in 5.10.
-    #    Use a line-by-line approach to replace the multi-line macro.
     lines = content.split('\n')
     new_lines = []
     skip_until_blank = False
@@ -34,10 +32,9 @@ def fix_ntsync():
             if line.strip() == '' or (not line.startswith('\t') and not line.startswith(' ')):
                 skip_until_blank = False
             else:
-                continue  # skip lines that are part of the old macro
+                continue
 
         if '#define ntsync_assert_held(obj)' in line and '\\' in line:
-            # Found the start of the old macro - skip all continuation lines
             skip_until_blank = True
             new_lines.append('#define ntsync_assert_held(obj) do { (void)(obj); } while (0)')
             continue
@@ -47,24 +44,18 @@ def fix_ntsync():
     content = '\n'.join(new_lines)
 
     # 2. Replace lockdep_assert(expr) with WARN_ON(!(expr))
-    #    lockdep_assert() doesn't exist in kernel 5.10 - it was added in 6.x
-    #    Handle both single-line and the simple cases (no nested parens in remaining calls)
     content = content.replace('lockdep_assert(', 'KAGAMI_LOCKDEP_ASSERT_HELPER(')
 
-    # Now replace the helper with WARN_ON
-    # First handle simple cases: single-line calls
     content = re.sub(
         r'KAGAMI_LOCKDEP_ASSERT_HELPER\(([^()]+)\)',
         r'WARN_ON(!(\1))',
         content
     )
-    # Handle cases with one level of nested parens like (a) || (b)
     content = re.sub(
         r'KAGAMI_LOCKDEP_ASSERT_HELPER\(([^()]*(?:\([^()]+\)[^()]*)+)\)',
         r'WARN_ON(!(\1))',
         content
     )
-    # If any remain, just replace them as-is
     if 'KAGAMI_LOCKDEP_ASSERT_HELPER' in content:
         remaining = content.count('KAGAMI_LOCKDEP_ASSERT_HELPER')
         print(f"[WARN] {path}: {remaining} lockdep_assert calls not replaced, forcing")
@@ -78,7 +69,7 @@ def fix_ntsync():
     content = content.replace(" != LOCK_STATE_NOT_HELD", "")
     content = content.replace(" == LOCK_STATE_NOT_HELD", " == 0")
 
-    # 4. Add include for linux/lockdep.h (needed for lockdep_assert_held calls that remain)
+    # 4. Add include for linux/lockdep.h
     if "linux/lockdep.h" not in content:
         content = content.replace(
             "#include <linux/module.h>",
@@ -258,7 +249,7 @@ def fix_bbr3_c():
 
 
 def fix_tcp_plb_c():
-    """Add tcp_get_plb_ctx implementation to tcp_plb.c"""
+    """Add full PLB pernet registration to tcp_plb.c for BBR3 compatibility"""
     path = "net/ipv4/tcp_plb.c"
     try:
         with open(path, "r") as f:
@@ -269,6 +260,10 @@ def fix_tcp_plb_c():
 
     orig = content
 
+    if "KagamiChihiro compat" in content:
+        print(f"[OK] {path}: already patched")
+        return
+
     # Add netns/generic.h include for net_generic() if missing
     if "net/netns/generic.h" not in content:
         content = content.replace(
@@ -276,8 +271,9 @@ def fix_tcp_plb_c():
             "#include <net/tcp.h>\n#include <net/netns/generic.h>",
             1
         )
-        print(f"[FIX] {path}: added #include <net/netns/generic.h> for net_generic()")
+        print(f"[FIX] {path}: added #include <net/netns/generic.h>")
 
+    # If tcp_get_plb_ctx already exists, skip full registration
     if "tcp_get_plb_ctx" in content:
         if content != orig:
             with open(path, "w") as f:
@@ -285,9 +281,13 @@ def fix_tcp_plb_c():
         print(f"[OK] {path}: tcp_get_plb_ctx already present")
         return
 
-    marker = "void tcp_plb_update_state"
-    if marker in content:
-        insert = """unsigned int tcp_plb_net_id __read_mostly;
+    # Add the COMPLETE PLB pernet registration code
+    # This includes: tcp_plb_net_id, tcp_get_plb_ctx, tcp_plb_max_rounds,
+    # plb_ctl_table_template, plb_net_init, plb_net_exit, plb_net_ops,
+    # and a late_initcall to register everything
+    plb_code = """
+/* KagamiChihiro compat: Full PLB pernet registration for BBR3 */
+unsigned int tcp_plb_net_id __read_mostly;
 
 struct tcp_plb_net_context *tcp_get_plb_ctx(struct net *net)
 {
@@ -295,13 +295,145 @@ struct tcp_plb_net_context *tcp_get_plb_ctx(struct net *net)
 }
 EXPORT_SYMBOL_GPL(tcp_get_plb_ctx);
 
+static u8 tcp_plb_max_rounds = 31;
+static int tcp_plb_max_cong_thresh = 256;
+
+static struct ctl_table plb_ctl_table_template[] = {
+\t{
+\t\t.procname       = "tcp_plb_enabled",
+\t\t.maxlen         = sizeof(u8),
+\t\t.mode           = 0644,
+\t\t.proc_handler   = proc_dou8vec_minmax,
+\t\t.extra1         = SYSCTL_ZERO,
+\t\t.extra2         = SYSCTL_ONE,
+\t},
+\t{
+\t\t.procname       = "tcp_plb_idle_rehash_rounds",
+\t\t.maxlen         = sizeof(u8),
+\t\t.mode           = 0644,
+\t\t.proc_handler   = proc_dou8vec_minmax,
+\t\t.extra2         = &tcp_plb_max_rounds,
+\t},
+\t{
+\t\t.procname       = "tcp_plb_rehash_rounds",
+\t\t.maxlen         = sizeof(u8),
+\t\t.mode           = 0644,
+\t\t.proc_handler   = proc_dou8vec_minmax,
+\t\t.extra2         = &tcp_plb_max_rounds,
+\t},
+\t{
+\t\t.procname       = "tcp_plb_suspend_rto_sec",
+\t\t.maxlen         = sizeof(u8),
+\t\t.mode           = 0644,
+\t\t.proc_handler   = proc_dou8vec_minmax,
+\t},
+\t{
+\t\t.procname       = "tcp_plb_cong_thresh",
+\t\t.maxlen         = sizeof(int),
+\t\t.mode           = 0644,
+\t\t.proc_handler   = proc_dointvec_minmax,
+\t\t.extra1         = SYSCTL_ZERO,
+\t\t.extra2         = &tcp_plb_max_cong_thresh,
+\t},
+\t{ }
+};
+
+static int __net_init plb_net_init(struct net *net)
+{
+\tstruct tcp_plb_net_context *ctx;
+\tstruct ctl_table *table;
+\tint i;
+
+\tctx = tcp_get_plb_ctx(net);
+\tif (!ctx)
+\t\treturn -ENOMEM;
+
+\tctx->params.sysctl_tcp_plb_enabled = 0;
+\tctx->params.sysctl_tcp_plb_idle_rehash_rounds = tcp_plb_max_rounds;
+\tctx->params.sysctl_tcp_plb_rehash_rounds = tcp_plb_max_rounds;
+\tctx->params.sysctl_tcp_plb_suspend_rto_sec = 0;
+\tctx->params.sysctl_tcp_plb_cong_thresh = tcp_plb_max_cong_thresh;
+
+\ttable = kmemdup(plb_ctl_table_template, sizeof(plb_ctl_table_template), GFP_KERNEL);
+\tif (!table)
+\t\treturn -ENOMEM;
+
+\tfor (i = 0; table[i].procname; i++) {
+\t\tif (strcmp(table[i].procname, "tcp_plb_enabled") == 0)
+\t\t\ttable[i].data = &ctx->params.sysctl_tcp_plb_enabled;
+\t\telse if (strcmp(table[i].procname, "tcp_plb_idle_rehash_rounds") == 0)
+\t\t\ttable[i].data = &ctx->params.sysctl_tcp_plb_idle_rehash_rounds;
+\t\telse if (strcmp(table[i].procname, "tcp_plb_rehash_rounds") == 0)
+\t\t\ttable[i].data = &ctx->params.sysctl_tcp_plb_rehash_rounds;
+\t\telse if (strcmp(table[i].procname, "tcp_plb_suspend_rto_sec") == 0)
+\t\t\ttable[i].data = &ctx->params.sysctl_tcp_plb_suspend_rto_sec;
+\t\telse if (strcmp(table[i].procname, "tcp_plb_cong_thresh") == 0)
+\t\t\ttable[i].data = &ctx->params.sysctl_tcp_plb_cong_thresh;
+\t}
+
+\tctx->sysctl_header = register_net_sysctl(net, "net/ipv4", table);
+\tif (!ctx->sysctl_header) {
+\t\tkfree(table);
+\t\treturn -ENOMEM;
+\t}
+
+\treturn 0;
+}
+
+static void __net_exit plb_net_exit(struct net *net)
+{
+\tstruct tcp_plb_net_context *ctx = tcp_get_plb_ctx(net);
+\tstruct ctl_table *table;
+
+\tif (!ctx)
+\t\treturn;
+
+\tif (ctx->sysctl_header) {
+\t\ttable = ctx->sysctl_header->ctl_table_arg;
+\t\tunregister_net_sysctl_table(ctx->sysctl_header);
+\t\tkfree(table);
+\t}
+}
+
+static struct pernet_operations plb_net_ops = {
+\t.init = plb_net_init,
+\t.exit = plb_net_exit,
+\t.id   = &tcp_plb_net_id,
+\t.size = sizeof(struct tcp_plb_net_context),
+};
+
+static int __init tcp_plb_register(void)
+{
+\tif (register_pernet_subsys(&plb_net_ops)) {
+\t\tpr_err("KagamiChihiro: failed to register PLB pernet ops\\n");
+\t\treturn -ENOMEM;
+\t}
+\treturn 0;
+}
+late_initcall(tcp_plb_register);
+
 """
-        content = content.replace(marker, insert + marker, 1)
+
+    # Insert the code before the first function definition
+    marker = "/* Called once per round-trip to update PLB state for a connection. */"
+    if marker in content:
+        content = content.replace(marker, plb_code + marker, 1)
+    else:
+        # Fallback: insert after includes
+        content = content.replace(
+            "#include <net/netns/generic.h>",
+            "#include <net/netns/generic.h>\n" + plb_code,
+            1
+        )
+
+    content = "/* KagamiChihiro compat: patched for 5.10 kernel */\n" + content
+
+    if content != orig:
         with open(path, "w") as f:
             f.write(content)
-        print(f"[FIX] {path}: added tcp_get_plb_ctx implementation")
+        print(f"[FIX] {path}: added full PLB pernet registration (plb_net_ops, plb_net_init/exit, late_initcall)")
     else:
-        print(f"[WARN] {path}: marker not found for tcp_get_plb_ctx insertion")
+        print(f"[OK] {path}: no changes needed")
 
 
 def fix_gso():
@@ -343,8 +475,6 @@ def fix_yamada():
         print(f"[OK] {path}: already patched")
         return
 
-    # ksu_pavolia_add_prop is declared extern but not defined anywhere in KernelSU-Next
-    # Replace the extern declaration + function with a no-op stub
     content = content.replace(
         "extern void ksu_pavolia_add_prop(const char *prop, const char *val);",
         "/* KagamiChihiro compat: stub for missing KernelSU symbol */\nstatic void ksu_pavolia_add_prop(const char *prop, const char *val) { (void)prop; (void)val; }"
