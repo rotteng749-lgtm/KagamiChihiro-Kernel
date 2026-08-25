@@ -40,32 +40,38 @@ jobs:
           bc bison flex libssl-dev \
           libelf-dev gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
           zip curl git python3 python-is-python3 device-tree-compiler \
-          cpio rsync
+          cpio rsync wget software-properties-common gnupg
 
-    - name: Setup Clang 12 (AOSP)
+    - name: Setup Clang 12 (AOSP prebuilt)
       run: |
-        CLANG_DIR="$HOME/clang-12"
-        if [ ! -d "$CLANG_DIR/bin" ]; then
-          echo "Downloading AOSP Clang 12 (r416183b)..."
-          mkdir -p "$CLANG_DIR"
-          curl -sL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-release/clang-r416183b.tar.gz" -o /tmp/clang.tar.gz
-          if [ -s /tmp/clang.tar.gz ]; then
-            tar -xzf /tmp/clang.tar.gz -C "$CLANG_DIR"
-          fi
-        fi
-        if [ ! -f "$CLANG_DIR/bin/clang" ]; then
-          echo "Download failed, installing clang-12 from apt..."
-          sudo apt-get install -y -qq clang-12 lld-12 llvm-12 || sudo apt-get install -y -qq clang lld llvm
-          echo "USING_SYSTEM_CLANG=1" > "$CLANG_DIR/.status"
+        # Try AOSP prebuilt clang-r416183b for android12
+        mkdir -p "$HOME/clang-12"
+        curl -sL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-release/clang-r416183b.tar.gz" -o /tmp/clang12.tar.gz
+        if [ -s /tmp/clang12.tar.gz ] && file /tmp/clang12.tar.gz | grep -q gzip; then
+          tar -xzf /tmp/clang12.tar.gz -C "$HOME/clang-12"
+          echo "PATH=$HOME/clang-12/bin:\$PATH" >> "$GITHUB_ENV"
+          echo "CC=clang" >> "$GITHUB_ENV"
+          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
+          echo "CROSS_COMPILE_COMPAT=arm-linux-gnueabi-" >> "$GITHUB_ENV"
+          "$HOME/clang-12/bin/clang" --version | head -1
+          echo "Clang 12 (AOSP) setup done"
         else
+          echo "AOSP download failed, trying apt..."
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 12 || true
+          sudo apt-get install -y -qq clang-12 lld-12 llvm-12 || true
+          # Fallback to latest available
+          if ! command -v clang-12 &>/dev/null; then
+            sudo apt-get install -y -qq clang lld llvm || true
+          fi
+          CLANG_BIN=$(which clang-12 2>/dev/null || which clang 2>/dev/null)
+          CLANG_DIR=$(dirname $(dirname "$CLANG_BIN"))
           echo "PATH=$CLANG_DIR/bin:\$PATH" >> "$GITHUB_ENV"
           echo "CC=clang" >> "$GITHUB_ENV"
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
           echo "CROSS_COMPILE_COMPAT=arm-linux-gnueabi-" >> "$GITHUB_ENV"
+          "$CLANG_BIN" --version | head -1
+          echo "Clang 12 setup done (fallback)"
         fi
-        sudo apt-get install -y -qq lld llvm || true
-        clang --version | head -1
-        echo "Clang 12 setup done"
 
     - name: Setup KernelSU-Next ${{ env.KERNELSU_VERSION }}
       run: |
