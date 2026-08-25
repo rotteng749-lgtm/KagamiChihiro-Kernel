@@ -41,36 +41,24 @@ jobs:
           zip curl git python3 python-is-python3 device-tree-compiler \
           cpio rsync wget gnupg lsb-release software-properties-common
 
-        # Install LLVM/Clang 19 + LLD from apt.llvm.org
+        # Install LLVM/Clang 19 + LLD
         wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19 2>/dev/null || true
         sudo apt-get install -y -qq clang lld llvm 2>/dev/null || true
         sudo apt-get install -y -qq clang-19 lld-19 llvm-19 2>/dev/null || true
 
-        # Find clang and ld.lld
-        CLANG_BIN=$(find /usr -name "clang-19" 2>/dev/null | head -1)
-        if [ -z "$CLANG_BIN" ]; then
-          CLANG_BIN=$(which clang 2>/dev/null)
-        fi
-        LLD_BIN=$(find /usr -name "ld.lld-19" -o -name "ld.lld" 2>/dev/null | head -1)
-
-        if [ -z "$CLANG_BIN" ] || [ -z "$LLD_BIN" ]; then
-          echo "ERROR: clang or ld.lld not found!"
-          which clang 2>/dev/null; which ld.lld 2>/dev/null
-          find /usr -name "ld.lld*" 2>/dev/null
+        if ! command -v ld.lld &>/dev/null && ! command -v ld.lld-19 &>/dev/null; then
+          echo "ERROR: ld.lld not found!"
+          apt list --installed 2>/dev/null | grep lld
           exit 1
         fi
 
-        echo "Found clang: $CLANG_BIN"
-        echo "Found ld.lld: $LLD_BIN"
-
-        CLANG_DIR=$(dirname "$CLANG_BIN")
-        echo "PATH=$CLANG_DIR:\$PATH" >> "$GITHUB_ENV"
         echo "CC=clang" >> "$GITHUB_ENV"
         echo "CROSS_COMPILE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
         echo "CROSS_COMPILE_COMPAT=arm-linux-gnueabi-" >> "$GITHUB_ENV"
 
-        "$CLANG_BIN" --version | head -1
-        echo "Toolchain setup done"
+        clang --version | head -1
+        ld.lld --version | head -1
+        echo "Toolchain ready"
 
     - name: Setup KernelSU-Next ${{ env.KERNELSU_VERSION }}
       run: |
@@ -128,7 +116,6 @@ jobs:
           **Arch:** aarch64 (arm64)
           **KernelSU-Next:** ${{ env.KERNELSU_VERSION }}
           **SUSFS:** v2.2.0
-          **Commit:** ${{ github.sha }}
 
           ### Build Info
           - Compiler: Clang ${{ env.CLANG_VERSION }} (${{ env.BUILD_LABEL }})
