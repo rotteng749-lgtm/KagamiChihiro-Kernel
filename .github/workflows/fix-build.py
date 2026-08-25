@@ -571,8 +571,131 @@ def fix_defconfig():
         print(f"[OK] {path}: no changes needed")
 
 
+def fix_susfs_kconfig():
+    """
+    Create standalone SUSFS Kconfig and source it from fs/Kconfig.
+    This avoids patching KernelSU's Kconfig (which breaks KernelSU-Next).
+    """
+    # 1. Create standalone Kconfig.susfs
+    susfs_kconfig = """config KSU_SUSFS
+	bool "KernelSU addon - SUSFS"
+	depends on KSU
+	default y
+	help
+	  Patch and Enable SUSFS to kernel with KernelSU.
+
+config KSU_SUSFS_SUS_PATH
+	bool "Enable to hide suspicious path"
+	depends on KSU_SUSFS
+	default y
+	help
+	  Effective only on zygote spawned user app process with uid >= 10000.
+
+config KSU_SUSFS_SUS_MOUNT
+	bool "Enable to hide suspicious mounts"
+	depends on KSU_SUSFS
+	default y
+	help
+	  Allow hiding all sus mounts from /proc/self/[mounts|mountinfo|mountstat] for non-su processes.
+
+config KSU_SUSFS_SUS_KSTAT
+	bool "Enable to spoof suspicious kstat"
+	depends on KSU_SUSFS
+	default y
+	help
+	  Effective only on zygote spawned user app process with uid >= 10000.
+
+config KSU_SUSFS_SPOOF_UNAME
+	bool "Enable to spoof uname"
+	depends on KSU_SUSFS
+	default y
+	help
+	  Effective on all processes.
+
+config KSU_SUSFS_ENABLE_LOG
+	bool "Enable logging susfs log to kernel"
+	depends on KSU_SUSFS
+	default n
+	help
+	  Allow logging susfs log to kernel, uncheck it to completely disable all susfs log.
+
+config KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+	bool "Enable to automatically hide ksu and susfs symbols from /proc/kallsyms"
+	depends on KSU_SUSFS
+	default y
+	help
+	  Effective on all processes.
+
+config KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+	bool "Enable to spoof /proc/bootconfig (gki) or /proc/cmdline (non-gki)"
+	depends on KSU_SUSFS
+	default y
+	help
+	  Effective on all processes.
+
+config KSU_SUSFS_OPEN_REDIRECT
+	bool "Enable to redirect a path to be opened with another path"
+	depends on KSU_SUSFS
+	default y
+	help
+	  Effective only on zygote spawned user app process with uid >= 10000.
+
+config KSU_SUSFS_SUS_MAP
+	bool "Enable to hide suspicious maps"
+	depends on KSU_SUSFS
+	default y
+	help
+	  Effective only on zygote spawned user app process with uid >= 10000.
+
+"""
+    kconfig_path = "fs/Kconfig.susfs"
+    try:
+        with open(kconfig_path, "w") as f:
+            f.write(susfs_kconfig)
+        print(f"[FIX] {kconfig_path}: created standalone SUSFS Kconfig")
+    except Exception as e:
+        print(f"[WARN] Could not create {kconfig_path}: {e}")
+        return
+
+    # 2. Source it from fs/Kconfig if not already sourced
+    fs_kconfig = "fs/Kconfig"
+    try:
+        with open(fs_kconfig, "r") as f:
+            content = f.read()
+    except FileNotFoundError:
+        print(f"[SKIP] {fs_kconfig} not found")
+        return
+
+    if 'Kconfig.susfs' not in content:
+        # Add at the end of the file
+        content = content.rstrip() + '\n\nsource "fs/Kconfig.susfs"\n'
+        with open(fs_kconfig, "w") as f:
+            f.write(content)
+        print(f"[FIX] {fs_kconfig}: added source Kconfig.susfs")
+    else:
+        print(f"[OK] {fs_kconfig}: already sources Kconfig.susfs")
+
+    # 3. Ensure susfs.o is in fs/Makefile
+    fs_makefile = "fs/Makefile"
+    try:
+        with open(fs_makefile, "r") as f:
+            content = f.read()
+    except FileNotFoundError:
+        print(f"[SKIP] {fs_makefile} not found")
+        return
+
+    if 'susfs.o' not in content:
+        content = content.rstrip() + '\nobj-$(CONFIG_KSU_SUSFS) += susfs.o\n'
+        with open(fs_makefile, "w") as f:
+            f.write(content)
+        print(f"[FIX] {fs_makefile}: added susfs.o build rule")
+    else:
+        print(f"[OK] {fs_makefile}: susfs.o already present")
+
+
 if __name__ == "__main__":
     print("=== Applying KagamiChihiro build fixes ===")
+    fix_susfs_kconfig()
     fix_ntsync()
     fix_tcp_h()
     fix_bbr3_c()
