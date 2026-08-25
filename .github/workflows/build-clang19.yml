@@ -1,0 +1,157 @@
+# ============================================================================
+#  KagamiChihiro GKI 5.10.264 — Clang 19 STABLE Build
+#  Target: Infinix Note 30 (X6833B / MT6789)
+#  Arch  : aarch64 (arm64)
+# ============================================================================
+name: "Build KagamiChihiro 5.10.264 [Clang 19 Stable]"
+
+on:
+  push:
+    branches: [ chihiro-rebase ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  KERNELSU_VERSION: v3.3.0
+  KERNEL_VERSION: "5.10.264"
+  CLANG_VERSION: "19"
+  BUILD_LABEL: "Stable"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+    - name: Checkout kernel source
+      uses: actions/checkout@v4
+      with:
+        ref: chihiro-rebase
+        submodules: false
+        fetch-depth: 0
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq \
+          bc bison flex libssl-dev \
+          libelf-dev gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+          zip curl git python3 python-is-python3 device-tree-compiler \
+          cpio rsync
+
+    - name: Setup Clang 19 (LLVM)
+      run: |
+        CLANG_DIR="$HOME/clang-19"
+        if [ ! -d "$CLANG_DIR/bin" ]; then
+          echo "Downloading Clang 19..."
+          mkdir -p "$CLANG_DIR"
+          curl -sL "https://github.com/nicoulaz/clang-build-action/releases/download/llvm-19.1.7/clang-19.1.7-x86_64-linux-gnu.tar.xz" -o /tmp/clang.tar.xz || \
+          curl -sL "https://github.com/nicoulaz/clang-build-action/releases/download/llvm-19/clang-llvm-19-x86_64-linux-gnu.tar.xz" -o /tmp/clang.tar.xz || \
+          { echo "Trying AOSP prebuilt..."; \
+            curl -sL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r536225.tar.gz" -o /tmp/clang.tar.gz; \
+            tar -xzf /tmp/clang.tar.gz -C "$CLANG_DIR"; \
+          }
+          if [ -f /tmp/clang.tar.xz ]; then
+            tar -xJf /tmp/clang.tar.xz -C "$CLANG_DIR" --strip-components=1
+          fi
+        fi
+        if [ ! -f "$CLANG_DIR/bin/clang" ]; then
+          echo "Download failed, trying apt..."
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19 || true
+          sudo apt-get install -y -qq clang-19 lld-19 llvm-19 || sudo apt-get install -y -qq clang lld llvm
+          echo "USING_SYSTEM_CLANG=1" > "$CLANG_DIR/.status"
+        else
+          echo "PATH=$CLANG_DIR/bin:\$PATH" >> "$GITHUB_ENV"
+          echo "CC=clang" >> "$GITHUB_ENV"
+          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
+          echo "CROSS_COMPILE_COMPAT=arm-linux-gnueabi-" >> "$GITHUB_ENV"
+        fi
+        sudo apt-get install -y -qq lld llvm || true
+        clang --version | head -1
+        echo "Clang 19 setup done"
+
+    - name: Setup KernelSU-Next ${{ env.KERNELSU_VERSION }}
+      run: |
+        if [ ! -d .deps/KernelSU-Next/kernel ]; then
+          mkdir -p .deps
+          git clone --depth=1 --branch ${{ env.KERNELSU_VERSION }} \
+            https://github.com/KernelSU-Next/KernelSU-Next.git .deps/KernelSU-Next
+        fi
+        rm -f drivers/kernelsu
+        ln -sf "$(pwd)/.deps/KernelSU-Next/kernel" drivers/kernelsu
+        ls -la drivers/kernelsu/Kconfig || (echo 'ERROR: kernelsu Kconfig not found' && exit 1)
+        grep -q 'CONFIG_KSU' drivers/Makefile || \
+          printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+        grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || \
+          sed -i '/endmenu/i\\tsource "drivers/kernelsu/Kconfig"' drivers/Kconfig
+        echo "KernelSU-Next ${{ env.KERNELSU_VERSION }} wired OK"
+
+    - name: Apply build fixes + defconfig tuning
+      run: python3 .github/workflows/fix-build.py
+
+    - name: Generate kernel defconfig
+      run: make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
+
+    - name: Build kernel Image
+      run: |
+        make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 -j$(nproc) Image Image.gz 2>&1 | \
+          tee out/build.log | grep -iE 'error|fatal|Kernel: arch' | tail -50
+        if [ ! -f out/arch/arm64/boot/Image.gz ]; then
+          echo "Build failed - full log:"
+          tail -100 out/build.log
+          exit 1
+        fi
+        echo "Kernel built: $(ls -lh out/arch/arm64/boot/Image.gz)"
+
+    - name: Package AnyKernel3 zip
+      run: python3 .github/workflows/package-zip.py
+
+    - name: Upload kernel zip (artifact)
+      uses: actions/upload-artifact@v4
+      with:
+        name: KagamiChihiro-${{ env.KERNEL_VERSION }}-Clang${{ env.CLANG_VERSION }}-${{ env.BUILD_LABEL }}
+        path: out/KagamiChihiro-${{ env.KERNEL_VERSION }}-Clang${{ env.CLANG_VERSION }}-${{ env.BUILD_LABEL }}.zip
+        retention-days: 14
+        if-no-files-found: error
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v${{ env.KERNEL_VERSION }}-clang${{ env.CLANG_VERSION }}-${{ env.BUILD_LABEL }}
+        name: "KagamiChihiro ${{ env.KERNEL_VERSION }} — Clang ${{ env.CLANG_VERSION }} (${{ env.BUILD_LABEL }})"
+        body: |
+          ## KagamiChihiro Kernel ${{ env.KERNEL_VERSION }}
+
+          **Target:** Infinix Note 30 (X6833B / MT6789)
+          **Arch:** aarch64 (arm64)
+          **Clang:** ${{ env.CLANG_VERSION }} (${{ env.BUILD_LABEL }})
+          **KernelSU-Next:** ${{ env.KERNELSU_VERSION }}
+          **SUSFS:** v2.2.0
+          **Commit:** ${{ github.sha }}
+
+          ### Build Info
+          - Compiler: Clang ${{ env.CLANG_VERSION }} (${{ env.BUILD_LABEL }})
+          - CPU Governor: Performance (max freq)
+          - GPU: Panfrost (Mali G57 MC2) Performance
+          - Display: MediaTek DRM (120Hz)
+          - KernelSU: Hidden via SUSFS
+          - Mount hiding: Enabled
+          - SELinux: Enforcing
+
+          ### Install
+          1. Reboot to recovery
+          2. Flash zip
+          3. Reboot
+
+          ### Changelog
+          - Built with Clang ${{ env.CLANG_VERSION }} (${{ env.BUILD_LABEL }})
+          - SUSFS v2.2.0 root hiding enabled
+          - CPU/GPU performance governor
+          - MediaTek DRM 120Hz display support
+          - Auto-built from commit ${{ github.sha }}
+        files: out/KagamiChihiro-${{ env.KERNEL_VERSION }}-Clang${{ env.CLANG_VERSION }}-${{ env.BUILD_LABEL }}.zip
+        make_latest: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
