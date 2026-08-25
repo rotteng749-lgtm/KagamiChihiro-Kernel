@@ -49,18 +49,18 @@ def fix_ntsync():
 
     content = re.sub(
         r'KAGAMI_LOCKDEP_ASSERT_HELPER\(([^()]+)\)',
-        r'WARN_ON(!(\1))', content
+        r'WARN_ON(!(\\1))', content
     )
     content = re.sub(
         r'KAGAMI_LOCKDEP_ASSERT_HELPER\(([^()]*(?:\([^()]+\)[^()]*)+)\)',
-        r'WARN_ON(!(\1))', content
+        r'WARN_ON(!(\\1))', content
     )
     if 'KAGAMI_LOCKDEP_ASSERT_HELPER' in content:
         remaining = content.count('KAGAMI_LOCKDEP_ASSERT_HELPER')
         print(f"[WARN] {path}: {remaining} lockdep_assert calls not replaced, forcing")
         content = re.sub(
             r'KAGAMI_LOCKDEP_ASSERT_HELPER\((.*?)\)',
-            r'WARN_ON(!(\1))', content
+            r'WARN_ON(!(\\1))', content
         )
 
     # 3. Remove any remaining LOCK_STATE_NOT_HELD references
@@ -484,11 +484,12 @@ def fix_yamada():
 
 def fix_defconfig():
     """
-    Performance, display, and SUSFS tuning via defconfig patching.
+    Performance and SUSFS tuning via defconfig patching.
     - CPU: performance governor (max freq on boot)
-    - GPU: Mali G57 MC2 (Panfrost) + performance devfreq
-    - Display: MediaTek DRM for 120Hz
-    - SUSFS: ensure all hooks active
+    - GPU: Panfrost for Mali G57 MC2 + performance devfreq
+    - SUSFS: set configs (SUSFS kernel code is patched in by susfs4ksu before this runs)
+    NOTE: DRM_MEDIATEK is NOT used - it's the mainline driver, not the vendor MediaTek display.
+          120Hz is controlled by the vendor display driver in vendor_dlkm, not GKI kernel config.
     """
     path = "arch/arm64/configs/gki_defconfig"
     try:
@@ -501,7 +502,6 @@ def fix_defconfig():
     orig = content
 
     # --- CPU Frequency: Performance governor ---
-    # The defconfig has POWERSAVE as default, change to PERFORMANCE
     content = re.sub(
         r'^CONFIG_CPU_FREQ_DEFAULT_GOV_POWERSAVE=y$',
         'CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y',
@@ -512,7 +512,6 @@ def fix_defconfig():
         'CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y',
         content, flags=re.MULTILINE
     )
-    # Ensure PERFORMANCE governor is enabled
     if 'CONFIG_CPU_FREQ_GOV_PERFORMANCE' not in content:
         content += "\n# KagamiChihiro: CPU performance governor\nCONFIG_CPU_FREQ_GOV_PERFORMANCE=y\n"
         print(f"[FIX] {path}: added CPU_FREQ_GOV_PERFORMANCE")
@@ -522,34 +521,27 @@ def fix_defconfig():
         content += "\n# KagamiChihiro: Mali G57 MC2 GPU (Panfrost)\nCONFIG_DRM_PANFROST=y\n"
         print(f"[FIX] {path}: added DRM_PANFROST for Mali G57 MC2")
 
-    # --- Display: MediaTek DRM for 120Hz support ---
-    if 'CONFIG_DRM_MEDIATEK' not in content:
-        content += "\n# KagamiChihiro: MediaTek DRM display (120Hz)\nCONFIG_DRM_MEDIATEK=y\nCONFIG_DRM_MEDIATEK_DP=n\nCONFIG_DRM_MEDIATEK_HDMI=n\n"
-        print(f"[FIX] {path}: added DRM_MEDIATEK for 120Hz display")
-
-    # --- MIPI DSI for panel communication ---
-    if 'CONFIG_DRM_MIPI_DSI' not in content:
-        content += "CONFIG_DRM_MIPI_DSI=y\n"
-        print(f"[FIX] {path}: added DRM_MIPI_DSI")
-
-    # --- Panel framework ---
-    if 'CONFIG_DRM_PANEL' not in content:
-        content += "CONFIG_DRM_PANEL=y\n"
-        print(f"[FIX] {path}: added DRM_PANEL")
-
-    if 'CONFIG_DRM_PANEL_SIMPLE' not in content:
-        content += "CONFIG_DRM_PANEL_SIMPLE=y\n"
-        print(f"[FIX] {path}: added DRM_PANEL_SIMPLE")
-
     # --- DEVFREQ: Performance governor for GPU ---
     if 'CONFIG_DEVFREQ_GOV_PERFORMANCE' not in content:
         content += "CONFIG_DEVFREQ_GOV_PERFORMANCE=y\n"
 
-    # --- SCHEDUTIL is still available as alternative ---
+    # --- SCHEDUTIL still available as alternative ---
     if 'CONFIG_CPU_FREQ_GOV_SCHEDUTIL' not in content:
         content += "CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y\n"
 
-    # --- SUSFS: ensure all configs are set ---
+    # --- MIPI DSI for panel communication (needed for display) ---
+    if 'CONFIG_DRM_MIPI_DSI' not in content:
+        content += "CONFIG_DRM_MIPI_DSI=y\n"
+
+    # --- DRM framebuffer support ---
+    if 'CONFIG_DRM_FBDEV_EMULATION' not in content:
+        content += "CONFIG_DRM_FBDEV_EMULATION=y\n"
+
+    # --- Suspend/resume for display ---
+    if 'CONFIG_PM' not in content:
+        content += "CONFIG_PM=y\n"
+
+    # --- SUSFS: ensure all configs are set (susfs4ksu patches add the Kconfig entries) ---
     susfs_defaults = {
         'CONFIG_KSU': 'y',
         'CONFIG_KSU_SUSFS': 'y',
@@ -564,7 +556,6 @@ def fix_defconfig():
         'CONFIG_KSU_SUSFS_SUS_MAP': 'y',
     }
     for cfg, val in susfs_defaults.items():
-        # Ensure the config is set correctly (not just present)
         pattern = rf'^{cfg}=.*$'
         if re.search(pattern, content, re.MULTILINE):
             content = re.sub(pattern, f'{cfg}={val}', content, flags=re.MULTILINE)
@@ -575,7 +566,7 @@ def fix_defconfig():
     if content != orig:
         with open(path, "w") as f:
             f.write(content)
-        print(f"[FIX] {path}: defconfig patched for performance/display/SUSFS")
+        print(f"[FIX] {path}: defconfig patched for performance/SUSFS")
     else:
         print(f"[OK] {path}: no changes needed")
 
