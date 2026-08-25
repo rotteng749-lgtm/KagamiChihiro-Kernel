@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Fix build errors for KagamiChihiro GKI 5.10 kernel.
-Handles API mismatches between 6.x patches and 5.10 base kernel.
+Handles API mismatches between 6.x patches and 5.10 base kernel,
+plus performance/display/SUSFS tuning.
 """
 import re, sys
 
@@ -48,21 +49,18 @@ def fix_ntsync():
 
     content = re.sub(
         r'KAGAMI_LOCKDEP_ASSERT_HELPER\(([^()]+)\)',
-        r'WARN_ON(!(\1))',
-        content
+        r'WARN_ON(!(\1))', content
     )
     content = re.sub(
         r'KAGAMI_LOCKDEP_ASSERT_HELPER\(([^()]*(?:\([^()]+\)[^()]*)+)\)',
-        r'WARN_ON(!(\1))',
-        content
+        r'WARN_ON(!(\1))', content
     )
     if 'KAGAMI_LOCKDEP_ASSERT_HELPER' in content:
         remaining = content.count('KAGAMI_LOCKDEP_ASSERT_HELPER')
         print(f"[WARN] {path}: {remaining} lockdep_assert calls not replaced, forcing")
         content = re.sub(
             r'KAGAMI_LOCKDEP_ASSERT_HELPER\((.*?)\)',
-            r'WARN_ON(!(\1))',
-            content
+            r'WARN_ON(!(\1))', content
         )
 
     # 3. Remove any remaining LOCK_STATE_NOT_HELD references
@@ -281,10 +279,6 @@ def fix_tcp_plb_c():
         print(f"[OK] {path}: tcp_get_plb_ctx already present")
         return
 
-    # Add the COMPLETE PLB pernet registration code
-    # This includes: tcp_plb_net_id, tcp_get_plb_ctx, tcp_plb_max_rounds,
-    # plb_ctl_table_template, plb_net_init, plb_net_exit, plb_net_ops,
-    # and a late_initcall to register everything
     plb_code = """
 /* KagamiChihiro compat: Full PLB pernet registration for BBR3 */
 unsigned int tcp_plb_net_id __read_mostly;
@@ -414,12 +408,10 @@ late_initcall(tcp_plb_register);
 
 """
 
-    # Insert the code before the first function definition
     marker = "/* Called once per round-trip to update PLB state for a connection. */"
     if marker in content:
         content = content.replace(marker, plb_code + marker, 1)
     else:
-        # Fallback: insert after includes
         content = content.replace(
             "#include <net/netns/generic.h>",
             "#include <net/netns/generic.h>\n" + plb_code,
@@ -431,7 +423,7 @@ late_initcall(tcp_plb_register);
     if content != orig:
         with open(path, "w") as f:
             f.write(content)
-        print(f"[FIX] {path}: added full PLB pernet registration (plb_net_ops, plb_net_init/exit, late_initcall)")
+        print(f"[FIX] {path}: added full PLB pernet registration")
     else:
         print(f"[OK] {path}: no changes needed")
 
@@ -490,6 +482,104 @@ def fix_yamada():
         print(f"[OK] {path}: no changes needed")
 
 
+def fix_defconfig():
+    """
+    Performance, display, and SUSFS tuning via defconfig patching.
+    - CPU: performance governor (max freq on boot)
+    - GPU: Mali G57 MC2 (Panfrost) + performance devfreq
+    - Display: MediaTek DRM for 120Hz
+    - SUSFS: ensure all hooks active
+    """
+    path = "arch/arm64/configs/gki_defconfig"
+    try:
+        with open(path, "r") as f:
+            content = f.read()
+    except FileNotFoundError:
+        print(f"[SKIP] {path} not found")
+        return
+
+    orig = content
+
+    # --- CPU Frequency: Performance governor ---
+    # The defconfig has POWERSAVE as default, change to PERFORMANCE
+    content = re.sub(
+        r'^CONFIG_CPU_FREQ_DEFAULT_GOV_POWERSAVE=y$',
+        'CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y',
+        content, flags=re.MULTILINE
+    )
+    content = re.sub(
+        r'^CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y$',
+        'CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y',
+        content, flags=re.MULTILINE
+    )
+    # Ensure PERFORMANCE governor is enabled
+    if 'CONFIG_CPU_FREQ_GOV_PERFORMANCE' not in content:
+        content += "\n# KagamiChihiro: CPU performance governor\nCONFIG_CPU_FREQ_GOV_PERFORMANCE=y\n"
+        print(f"[FIX] {path}: added CPU_FREQ_GOV_PERFORMANCE")
+
+    # --- GPU: Panfrost for Mali G57 MC2 (MT6789) ---
+    if 'CONFIG_DRM_PANFROST' not in content:
+        content += "\n# KagamiChihiro: Mali G57 MC2 GPU (Panfrost)\nCONFIG_DRM_PANFROST=y\n"
+        print(f"[FIX] {path}: added DRM_PANFROST for Mali G57 MC2")
+
+    # --- Display: MediaTek DRM for 120Hz support ---
+    if 'CONFIG_DRM_MEDIATEK' not in content:
+        content += "\n# KagamiChihiro: MediaTek DRM display (120Hz)\nCONFIG_DRM_MEDIATEK=y\nCONFIG_DRM_MEDIATEK_DP=n\nCONFIG_DRM_MEDIATEK_HDMI=n\n"
+        print(f"[FIX] {path}: added DRM_MEDIATEK for 120Hz display")
+
+    # --- MIPI DSI for panel communication ---
+    if 'CONFIG_DRM_MIPI_DSI' not in content:
+        content += "CONFIG_DRM_MIPI_DSI=y\n"
+        print(f"[FIX] {path}: added DRM_MIPI_DSI")
+
+    # --- Panel framework ---
+    if 'CONFIG_DRM_PANEL' not in content:
+        content += "CONFIG_DRM_PANEL=y\n"
+        print(f"[FIX] {path}: added DRM_PANEL")
+
+    if 'CONFIG_DRM_PANEL_SIMPLE' not in content:
+        content += "CONFIG_DRM_PANEL_SIMPLE=y\n"
+        print(f"[FIX] {path}: added DRM_PANEL_SIMPLE")
+
+    # --- DEVFREQ: Performance governor for GPU ---
+    if 'CONFIG_DEVFREQ_GOV_PERFORMANCE' not in content:
+        content += "CONFIG_DEVFREQ_GOV_PERFORMANCE=y\n"
+
+    # --- SCHEDUTIL is still available as alternative ---
+    if 'CONFIG_CPU_FREQ_GOV_SCHEDUTIL' not in content:
+        content += "CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y\n"
+
+    # --- SUSFS: ensure all configs are set ---
+    susfs_defaults = {
+        'CONFIG_KSU': 'y',
+        'CONFIG_KSU_SUSFS': 'y',
+        'CONFIG_KSU_SUSFS_SUS_PATH': 'y',
+        'CONFIG_KSU_SUSFS_SUS_MOUNT': 'y',
+        'CONFIG_KSU_SUSFS_SUS_KSTAT': 'y',
+        'CONFIG_KSU_SUSFS_SPOOF_UNAME': 'y',
+        'CONFIG_KSU_SUSFS_ENABLE_LOG': 'n',
+        'CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS': 'y',
+        'CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG': 'y',
+        'CONFIG_KSU_SUSFS_OPEN_REDIRECT': 'y',
+        'CONFIG_KSU_SUSFS_SUS_MAP': 'y',
+    }
+    for cfg, val in susfs_defaults.items():
+        # Ensure the config is set correctly (not just present)
+        pattern = rf'^{cfg}=.*$'
+        if re.search(pattern, content, re.MULTILINE):
+            content = re.sub(pattern, f'{cfg}={val}', content, flags=re.MULTILINE)
+        elif cfg not in content:
+            content += f"{cfg}={val}\n"
+            print(f"[FIX] {path}: added {cfg}={val}")
+
+    if content != orig:
+        with open(path, "w") as f:
+            f.write(content)
+        print(f"[FIX] {path}: defconfig patched for performance/display/SUSFS")
+    else:
+        print(f"[OK] {path}: no changes needed")
+
+
 if __name__ == "__main__":
     print("=== Applying KagamiChihiro build fixes ===")
     fix_ntsync()
@@ -498,4 +588,5 @@ if __name__ == "__main__":
     fix_tcp_plb_c()
     fix_gso()
     fix_yamada()
+    fix_defconfig()
     print("=== Done ===")
