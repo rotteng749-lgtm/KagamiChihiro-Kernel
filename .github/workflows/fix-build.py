@@ -693,9 +693,69 @@ config KSU_SUSFS_SUS_MAP
         print(f"[OK] {fs_makefile}: susfs.o already present")
 
 
+def fix_susfs_c():
+    """
+    Fix fs/susfs.c: Add stubs for KernelSU symbols that susfs.c depends on.
+    susfs.c calls susfs_is_current_ksu_domain(), setup_selinux(), and references ksu_cred.
+    These are defined in KernelSU's code, but we use official KernelSU-Next which may not
+    export them in the same way. Add weak stubs so linking succeeds.
+    """
+    path = "fs/susfs.c"
+    try:
+        with open(path, "r") as f:
+            content = f.read()
+    except FileNotFoundError:
+        print(f"[SKIP] {path} not found")
+        return
+
+    orig = content
+
+    if "KagamiChihiro compat" in content:
+        print(f"[OK] {path}: already patched")
+        return
+
+    # Add stubs for KernelSU symbols after the extern declarations
+    stubs = """
+/* KagamiChihiro compat: stubs for KernelSU symbols */
+#ifndef __weak
+#define __weak __attribute__((weak))
+#endif
+
+__weak bool susfs_is_current_ksu_domain(void) { return false; }
+__weak void setup_selinux(const char *domain, struct cred *cred) { (void)domain; (void)cred; }
+
+/* ksu_cred is defined in KernelSU; provide a weak alias */
+static struct cred _ksu_cred_stub;
+__weak struct cred *ksu_cred = &_ksu_cred_stub;
+"""
+
+    # Insert stubs after the extern declarations
+    marker = "extern struct cred *ksu_cred;"
+    if marker in content:
+        content = content.replace(marker, marker + "\n" + stubs)
+        print(f"[FIX] {path}: added KernelSU symbol stubs")
+    else:
+        # Try inserting after #include <linux/susfs.h>
+        marker2 = '#include <linux/susfs.h>'
+        if marker2 in content:
+            content = content.replace(marker2, marker2 + "\n" + stubs, 1)
+            print(f"[FIX] {path}: added KernelSU symbol stubs after include")
+        else:
+            print(f"[WARN] {path}: could not find insertion point for stubs")
+
+    content = "/* KagamiChihiro compat: patched for 5.10 kernel */\n" + content
+
+    if content != orig:
+        with open(path, "w") as f:
+            f.write(content)
+    else:
+        print(f"[OK] {path}: no changes needed")
+
+
 if __name__ == "__main__":
     print("=== Applying KagamiChihiro build fixes ===")
     fix_susfs_kconfig()
+    fix_susfs_c()
     fix_ntsync()
     fix_tcp_h()
     fix_bbr3_c()
