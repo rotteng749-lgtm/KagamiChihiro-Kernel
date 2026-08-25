@@ -33,44 +33,50 @@ jobs:
         submodules: false
         fetch-depth: 0
 
-    - name: Install build dependencies
+    - name: Install build dependencies + Clang
       run: |
         sudo apt-get update -qq
         sudo apt-get install -y -qq \
           bc bison flex libssl-dev \
           libelf-dev gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
           zip curl git python3 python-is-python3 device-tree-compiler \
-          cpio rsync wget software-properties-common gnupg
+          cpio rsync wget gnupg lsb-release software-properties-common
 
-    - name: Setup Clang 12 (AOSP prebuilt)
-      run: |
         # Try AOSP prebuilt clang-r416183b for android12
-        mkdir -p "$HOME/clang-12"
+        AOSP_OK=false
+        mkdir -p "$HOME/clang-aosp"
         curl -sL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-release/clang-r416183b.tar.gz" -o /tmp/clang12.tar.gz
         if [ -s /tmp/clang12.tar.gz ] && file /tmp/clang12.tar.gz | grep -q gzip; then
-          tar -xzf /tmp/clang12.tar.gz -C "$HOME/clang-12"
-          echo "PATH=$HOME/clang-12/bin:\$PATH" >> "$GITHUB_ENV"
-          echo "CC=clang" >> "$GITHUB_ENV"
-          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
-          echo "CROSS_COMPILE_COMPAT=arm-linux-gnueabi-" >> "$GITHUB_ENV"
-          "$HOME/clang-12/bin/clang" --version | head -1
-          echo "Clang 12 (AOSP) setup done"
-        else
-          echo "AOSP download failed, trying apt..."
-          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 12 || true
-          sudo apt-get install -y -qq clang-12 lld-12 llvm-12 || true
-          # Fallback to latest available
-          if ! command -v clang-12 &>/dev/null; then
-            sudo apt-get install -y -qq clang lld llvm || true
+          tar -xzf /tmp/clang12.tar.gz -C "$HOME/clang-aosp"
+          if [ -f "$HOME/clang-aosp/bin/clang" ] && [ -f "$HOME/clang-aosp/bin/ld.lld" ]; then
+            AOSP_OK=true
+            echo "PATH=$HOME/clang-aosp/bin:\$PATH" >> "$GITHUB_ENV"
+            echo "CC=clang" >> "$GITHUB_ENV"
+            echo "CROSS_COMPILE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
+            echo "CROSS_COMPILE_COMPAT=arm-linux-gnueabi-" >> "$GITHUB_ENV"
+            "$HOME/clang-aosp/bin/clang" --version | head -1
+            "$HOME/clang-aosp/bin/ld.lld" --version | head -1
+            echo "AOSP Clang 12 setup done"
           fi
-          CLANG_BIN=$(which clang-12 2>/dev/null || which clang 2>/dev/null)
-          CLANG_DIR=$(dirname $(dirname "$CLANG_BIN"))
-          echo "PATH=$CLANG_DIR/bin:\$PATH" >> "$GITHUB_ENV"
+        fi
+
+        if [ "$AOSP_OK" = false ]; then
+          echo "AOSP download failed, using system clang..."
+          sudo apt-get install -y -qq clang lld llvm 2>/dev/null || true
+          sudo apt-get install -y -qq clang-14 lld-14 llvm-14 2>/dev/null || true
+          CLANG_BIN=$(which clang 2>/dev/null)
+          LLD_BIN=$(which ld.lld 2>/dev/null)
+          if [ -z "$CLANG_BIN" ] || [ -z "$LLD_BIN" ]; then
+            echo "ERROR: clang or ld.lld not found!"
+            exit 1
+          fi
+          CLANG_DIR=$(dirname "$CLANG_BIN")
+          echo "PATH=$CLANG_DIR:\$PATH" >> "$GITHUB_ENV"
           echo "CC=clang" >> "$GITHUB_ENV"
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
           echo "CROSS_COMPILE_COMPAT=arm-linux-gnueabi-" >> "$GITHUB_ENV"
           "$CLANG_BIN" --version | head -1
-          echo "Clang 12 setup done (fallback)"
+          echo "System clang setup done (fallback)"
         fi
 
     - name: Setup KernelSU-Next ${{ env.KERNELSU_VERSION }}
@@ -127,7 +133,6 @@ jobs:
 
           **Target:** Infinix Note 30 (X6833B / MT6789)
           **Arch:** aarch64 (arm64)
-          **Clang:** ${{ env.CLANG_VERSION }} (${{ env.BUILD_LABEL }}) — original AOSP android12 clang
           **KernelSU-Next:** ${{ env.KERNELSU_VERSION }}
           **SUSFS:** v2.2.0
           **Commit:** ${{ github.sha }}
@@ -135,23 +140,15 @@ jobs:
           ### Build Info
           - Compiler: Clang ${{ env.CLANG_VERSION }} (${{ env.BUILD_LABEL }}) — original AOSP android12 clang
           - CPU Governor: Performance (max freq)
-          - GPU: Panfrost (Mali G57 MC2) Performance
+          - GPU: Panfrost (Mali G57 MC2)
           - Display: MediaTek DRM (120Hz)
           - KernelSU: Hidden via SUSFS
-          - Mount hiding: Enabled
           - SELinux: Enforcing
 
           ### Install
           1. Reboot to recovery
           2. Flash zip
           3. Reboot
-
-          ### Changelog
-          - Built with Clang ${{ env.CLANG_VERSION }} (${{ env.BUILD_LABEL }})
-          - SUSFS v2.2.0 root hiding enabled
-          - CPU/GPU performance governor
-          - MediaTek DRM 120Hz display support
-          - Auto-built from commit ${{ github.sha }}
         files: out/KagamiChihiro-${{ env.KERNEL_VERSION }}-Clang${{ env.CLANG_VERSION }}-${{ env.BUILD_LABEL }}.zip
         make_latest: false
       env:
