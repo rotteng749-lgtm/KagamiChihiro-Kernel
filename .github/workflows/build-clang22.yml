@@ -41,15 +41,12 @@ jobs:
           zip curl git python3 python-is-python3 device-tree-compiler \
           cpio rsync wget gnupg lsb-release software-properties-common
 
-        # Install LLVM/Clang + LLD
         wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22 2>/dev/null || true
         sudo apt-get install -y -qq clang lld llvm 2>/dev/null || true
         sudo apt-get install -y -qq clang-22 lld-22 llvm-22 2>/dev/null || true
 
-        # Verify ld.lld exists
         if ! command -v ld.lld &>/dev/null && ! command -v ld.lld-22 &>/dev/null; then
           echo "ERROR: ld.lld not found!"
-          apt list --installed 2>/dev/null | grep lld
           exit 1
         fi
 
@@ -72,34 +69,22 @@ jobs:
         cp .deps/susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
         cp .deps/susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/
 
-        # Apply the main SUSFS patch to kernel
-        cd .deps/susfs4ksu
-        SUSFS_PATCH=$(find kernel_patches -name '50_add_susfs_in_gki-android12-5.10.patch' | head -1)
-        cd ../..
-        if [ -n "$SUSFS_PATCH" ]; then
-          patch -p1 -d . < ".deps/$SUSFS_PATCH" || echo "WARN: some hunks may have failed"
+        # Apply the main SUSFS patch (kernel root ONLY, NOT the KernelSU patch)
+        SUSFS_PATCH=".deps/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch"
+        if [ -f "$SUSFS_PATCH" ]; then
+          patch -p1 < "$SUSFS_PATCH" || echo "WARN: some hunks may have failed"
         else
           echo "ERROR: SUSFS patch not found!"
           exit 1
         fi
 
-        echo "SUSFS kernel patches applied"
+        echo "SUSFS kernel patches applied (kernel root only)"
 
     - name: Setup KernelSU-Next ${{ env.KERNELSU_VERSION }}
       run: |
-        # Clone KernelSU-Next
         git clone --depth=1 --branch ${{ env.KERNELSU_VERSION }} \
           https://github.com/KernelSU-Next/KernelSU-Next.git .deps/KernelSU-Next
 
-        # Apply SUSFS enable patch to KernelSU
-        if [ -f .deps/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ]; then
-          cd .deps/KernelSU-Next
-          patch -p1 < ../../.deps/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || \
-            echo "WARN: KernelSU SUSFS patch may have failed"
-          cd ../..
-        fi
-
-        # Wire up KernelSU to kernel build system
         rm -f drivers/kernelsu
         ln -sf "$(pwd)/.deps/KernelSU-Next/kernel" drivers/kernelsu
         ls -la drivers/kernelsu/Kconfig || (echo 'ERROR: kernelsu Kconfig not found' && exit 1)
@@ -107,7 +92,7 @@ jobs:
           printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
         grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || \
           sed -i '/endmenu/i\\tsource "drivers/kernelsu/Kconfig"' drivers/Kconfig
-        echo "KernelSU-Next ${{ env.KERNELSU_VERSION }} + SUSFS wired OK"
+        echo "KernelSU-Next ${{ env.KERNELSU_VERSION }} wired OK (no KernelSU SUSFS patch applied)"
 
     - name: Apply build fixes + defconfig tuning
       run: python3 .github/workflows/fix-build.py
@@ -148,7 +133,7 @@ jobs:
           **Target:** Infinix Note 30 (X6833B / MT6789)
           **Arch:** aarch64 (arm64)
           **KernelSU-Next:** ${{ env.KERNELSU_VERSION }}
-          **SUSFS:** Integrated via susfs4ksu
+          **SUSFS:** Integrated via susfs4ksu (kernel root patches)
 
           ### Build Info
           - Compiler: Clang ${{ env.CLANG_VERSION }} (${{ env.BUILD_LABEL }})
@@ -159,14 +144,10 @@ jobs:
           - SELinux: Enforcing
 
           ### Install
-          1. Install SUSFS module in KernelSU Manager
+          1. Install susfs4ksu-module (sidex15) in KernelSU Manager
           2. Reboot to recovery
           3. Flash zip
           4. Reboot
-
-          ### Notes
-          - Install the susfs4ksu-module (sidex15) in KernelSU Manager for full hiding
-          - 120Hz display is controlled by vendor display driver (vendor_dlkm)
         files: out/KagamiChihiro-${{ env.KERNEL_VERSION }}-Clang${{ env.CLANG_VERSION }}-${{ env.BUILD_LABEL }}.zip
         make_latest: false
       env:
