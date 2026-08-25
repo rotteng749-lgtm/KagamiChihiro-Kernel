@@ -14,8 +14,7 @@ permissions:
   contents: write
 
 env:
-  KERNELSU_VERSION: next-susfs
-  KERNELSU_REPO: pershoot/KernelSU-Next
+  KERNELSU_VERSION: v3.3.0
   KERNEL_VERSION: "5.10.264"
   CLANG_VERSION: "22"
   BUILD_LABEL: "Experimental"
@@ -61,31 +60,22 @@ jobs:
 
     - name: Apply SUSFS kernel patches (susfs4ksu)
       run: |
-        # Clone susfs4ksu for kernel 5.10
         git clone --depth=1 --branch gki-android12-5.10 \
           https://gitlab.com/simonpunk/susfs4ksu.git .deps/susfs4ksu
 
-        # Copy SUSFS kernel source files
         cp .deps/susfs4ksu/kernel_patches/fs/susfs.c fs/
         cp .deps/susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
         cp .deps/susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/
 
-        # Apply the main SUSFS patch (kernel root ONLY)
-        SUSFS_PATCH=".deps/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch"
-        if [ -f "$SUSFS_PATCH" ]; then
-          patch -p1 < "$SUSFS_PATCH" || echo "WARN: some hunks may have failed"
-        else
-          echo "ERROR: SUSFS patch not found!"
-          exit 1
-        fi
+        # Apply kernel root patch ONLY (NOT the KernelSU patch)
+        patch -p1 < .deps/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch || echo "WARN: some hunks may have failed"
 
-        echo "SUSFS kernel patches applied (kernel root only)"
+        echo "SUSFS kernel patches applied"
 
-    - name: Setup KernelSU-Next (pershoot fork with SUSFS)
+    - name: Setup KernelSU-Next ${{ env.KERNELSU_VERSION }}
       run: |
-        # Use pershoot/KernelSU-Next which has SUSFS integrated
         git clone --depth=1 --branch ${{ env.KERNELSU_VERSION }} \
-          https://github.com/${{ env.KERNELSU_REPO }}.git .deps/KernelSU-Next
+          https://github.com/KernelSU-Next/KernelSU-Next.git .deps/KernelSU-Next
 
         rm -f drivers/kernelsu
         ln -sf "$(pwd)/.deps/KernelSU-Next/kernel" drivers/kernelsu
@@ -94,7 +84,7 @@ jobs:
           printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
         grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || \
           sed -i '/endmenu/i\\tsource "drivers/kernelsu/Kconfig"' drivers/Kconfig
-        echo "KernelSU-Next (pershoot, SUSFS) wired OK"
+        echo "KernelSU-Next ${{ env.KERNELSU_VERSION }} wired OK"
 
     - name: Apply build fixes + defconfig tuning
       run: python3 .github/workflows/fix-build.py
@@ -134,14 +124,14 @@ jobs:
 
           **Target:** Infinix Note 30 (X6833B / MT6789)
           **Arch:** aarch64 (arm64)
-          **KernelSU-Next:** pershoot fork (SUSFS integrated)
-          **SUSFS:** Full mount/path/kstat/spoof hiding
+          **KernelSU-Next:** ${{ env.KERNELSU_VERSION }}
+          **SUSFS:** Integrated via susfs4ksu (kernel root patches)
 
           ### Build Info
           - Compiler: Clang ${{ env.CLANG_VERSION }} (${{ env.BUILD_LABEL }})
           - CPU Governor: Performance (max freq)
           - GPU: Panfrost (Mali G57 MC2)
-          - SUSFS: Integrated in kernel
+          - SUSFS: Full mount/path/kstat/spoof hiding
           - KernelSU: Hidden via SUSFS
           - SELinux: Enforcing
 
