@@ -2,22 +2,32 @@
 """
 Package AnyKernel3 zip for KagamiChihiro kernel.
 Creates a flashable zip with proper anykernel.sh for GKI devices.
+Supports dynamic naming from environment variables.
 """
 import os
 import subprocess
 import sys
 
-ZIP_NAME = "KagamiChihiro-5.10.260.zip"
+# Read from environment (set by each workflow)
+KERNEL_VERSION = os.environ.get("KERNEL_VERSION", "5.10.264")
+CLANG_VERSION = os.environ.get("CLANG_VERSION", "0")
+BUILD_LABEL = os.environ.get("BUILD_LABEL", "unknown")
+
+if CLANG_VERSION != "0":
+    ZIP_NAME = f"KagamiChihiro-{KERNEL_VERSION}-Clang{CLANG_VERSION}-{BUILD_LABEL}.zip"
+else:
+    ZIP_NAME = f"KagamiChihiro-{KERNEL_VERSION}.zip"
+
 AK3_DIR = ".deps/AnyKernel3"
 PKG_DIR = "out/AnyKernel3"
 
-ANYKERNEL_SH = """### AnyKernel3 Ramdisk Mod Script
+ANYKERNEL_SH = f"""### AnyKernel3 Ramdisk Mod Script
 ## osm0sis @ xda-developers
 
 ### AnyKernel setup
 # global properties
-properties() { '
-kernel.string=KagamiChihiro 5.10.260
+properties() {{ '
+kernel.string=KagamiChihiro {KERNEL_VERSION} (Clang {CLANG_VERSION} {BUILD_LABEL})
 do.devicecheck=0
 do.modules=0
 do.systemless=0
@@ -31,7 +41,7 @@ device.name5=
 supported.versions=
 supported.patchlevels=
 supported.vendorpatchlevels=
-'; } # end properties
+'; }} # end properties
 
 ### AnyKernel install
 ## boot shell variables
@@ -44,7 +54,8 @@ PATCH_VBMETA_FLAG=auto;
 . tools/ak3-core.sh;
 
 ui_print " "
-ui_print "KagamiChihiro Kernel 5.10.260"
+ui_print "KagamiChihiro Kernel {KERNEL_VERSION}"
+ui_print "Compiler: Clang {CLANG_VERSION} ({BUILD_LABEL})"
 ui_print "Target: Infinix Note 30 (X6833B / MT6789)"
 ui_print " "
 
@@ -60,6 +71,8 @@ fi
 
 
 def main():
+    print(f"Packaging: {ZIP_NAME}")
+
     # Clone AnyKernel3 if not present
     if not os.path.isdir(AK3_DIR):
         subprocess.run(
